@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     smtp_username: str | None = None
     smtp_password: str | None = None
     smtp_from: str | None = None
+    admin_notification_email_csv: str = ""
 
     ai_api_base_url: str | None = None
     ai_api_key: str | None = None
@@ -41,6 +42,14 @@ class Settings(BaseSettings):
     @cached_property
     def cors_origins(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origin_csv.split(",") if origin.strip()]
+
+    @cached_property
+    def admin_notification_emails(self) -> list[str]:
+        return [
+            email.strip()
+            for email in self.admin_notification_email_csv.split(",")
+            if email.strip()
+        ]
 
 
 settings = Settings()

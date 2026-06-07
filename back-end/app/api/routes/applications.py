@@ -21,6 +21,7 @@ from app.schemas.application import (
 )
 from app.services.ai_review import ai_review_service
 from app.services.file_storage import file_storage_service
+from app.services.notification import notification_service
 
 router = APIRouter(prefix="/applications", tags=["applications"])
 
@@ -78,6 +79,28 @@ async def save_application_file(
     )
 
 
+def format_application_label(application: Application) -> str:
+    return (
+        f"申请编号：{application.id}\n"
+        f"申请类型：{application.application_type}\n"
+        f"申请组织：{application.organization or '未填写'}\n"
+        f"申请人：{application.applicant_name or '未填写'}\n"
+        f"申请部门：{application.applicant_department or '未填写'}"
+    )
+
+
+def summarize_review_problems(
+    issues: list[ReviewIssue],
+    conflicts: list[ConflictItem],
+) -> str:
+    lines = [f"{issue.type}: {issue.message}" for issue in issues]
+    lines.extend(
+        f"CONFLICT: {conflict.start_at} - {conflict.end_at} {conflict.message}"
+        for conflict in conflicts
+    )
+    return "\n".join(lines)
+
+
 @router.get("", response_model=list[ApplicationRead])
 async def list_my_applications(
     current_user: Annotated[User, Depends(get_current_user)],
@@ -113,6 +136,16 @@ async def upload_application_file(
 
     uploaded = await save_application_file(db, application_id, file_type, file)
     application.status = "pending_admin_submit"
+    await notification_service.notify_admins(
+        db=db,
+        application=application,
+        notification_type="pending_admin_submit",
+        subject="有申请材料待管理员提交",
+        body=(
+            "用户已补交申请材料，申请进入待管理员提交状态。\n\n"
+            f"{format_application_label(application)}"
+        ),
+    )
     await db.commit()
     return GenericFileUploadResponse(
         application_id=application.id,
@@ -191,6 +224,16 @@ async def submit_signed_files(
         )
 
     application.status = "pending_admin_submit"
+    await notification_service.notify_admins(
+        db=db,
+        application=application,
+        notification_type="pending_admin_submit",
+        subject="有申请材料待管理员提交",
+        body=(
+            "用户已上传签字盖章材料，申请进入待管理员提交状态。\n\n"
+            f"{format_application_label(application)}"
+        ),
+    )
     await db.commit()
 
     return SignedFilesSubmitResponse(
@@ -230,6 +273,13 @@ async def submit_pre_review(
     ai_result = await ai_review_service.pre_review_word(application_type, file)
     issues = list(ai_result.issues)
     conflicts: list[ConflictItem] = []
+    if not ai_result.extracted_time_slots:
+        issues.append(
+            ReviewIssue(
+                type="MISSING_TIME_SLOT",
+                message="AI 未能从申请材料中提取出借用日期和具体时间段",
+            )
+        )
 
     if ai_result.extracted_time_slots:
         for slot in ai_result.extracted_time_slots:
@@ -266,42 +316,44 @@ async def submit_pre_review(
 
     passed = ai_result.passed and not issues and not conflicts
     application_id: int | None = None
+    auth_profile_result = await db.execute(
+        select(AuthProfile).where(AuthProfile.user_id == current_user.id)
+    )
+    auth_profile = auth_profile_result.scalar_one_or_none()
+    stored_path = await file_storage_service.save_upload(file, "pre-review")
+    first_slot = ai_result.extracted_time_slots[0] if ai_result.extracted_time_slots else None
+    last_slot = ai_result.extracted_time_slots[-1] if ai_result.extracted_time_slots else None
+
+    application = Application(
+        user_id=current_user.id,
+        application_type=application_type,
+        organization=ai_result.organization or current_user.department,
+        purpose_summary=ai_result.purpose_summary,
+        applicant_name=auth_profile.name if auth_profile else None,
+        applicant_sduid=auth_profile.sduid if auth_profile else None,
+        applicant_department=current_user.department,
+        venue_id=venue_id,
+        status="pending_signed_files" if passed else "pending_admin_pre_review",
+        start_at=first_slot.start_at if first_slot else None,
+        end_at=last_slot.end_at if last_slot else None,
+    )
+    db.add(application)
+    await db.flush()
+
+    db.add(
+        ApplicationFile(
+            application_id=application.id,
+            file_type="pre_review_word",
+            version=1,
+            original_filename=file.filename or "application.docx",
+            stored_path=stored_path,
+            review_status="passed" if passed else "failed",
+            reject_reason=summarize_review_problems(issues, conflicts) if not passed else None,
+        )
+    )
+    application_id = application.id
+
     if passed:
-        auth_profile_result = await db.execute(
-            select(AuthProfile).where(AuthProfile.user_id == current_user.id)
-        )
-        auth_profile = auth_profile_result.scalar_one_or_none()
-        first_slot = ai_result.extracted_time_slots[0]
-        last_slot = ai_result.extracted_time_slots[-1]
-        stored_path = await file_storage_service.save_upload(file, "pre-review")
-
-        application = Application(
-            user_id=current_user.id,
-            application_type=application_type,
-            organization=ai_result.organization or current_user.department,
-            purpose_summary=ai_result.purpose_summary,
-            applicant_name=auth_profile.name if auth_profile else None,
-            applicant_sduid=auth_profile.sduid if auth_profile else None,
-            applicant_department=current_user.department,
-            venue_id=venue_id,
-            status="pending_signed_files",
-            start_at=first_slot.start_at,
-            end_at=last_slot.end_at,
-        )
-        db.add(application)
-        await db.flush()
-
-        db.add(
-            ApplicationFile(
-                application_id=application.id,
-                file_type="pre_review_word",
-                version=1,
-                original_filename=file.filename or "application.docx",
-                stored_path=stored_path,
-                review_status="passed",
-            )
-        )
-
         for slot in ai_result.extracted_time_slots:
             if slot.start_at is None or slot.end_at is None:
                 continue
@@ -314,15 +366,37 @@ async def submit_pre_review(
                     status="pre_reserved",
                 )
             )
+        await notification_service.send_and_log(
+            db=db,
+            application_id=application.id,
+            recipients=[current_user.email],
+            notification_type="pre_review_passed",
+            subject="场地申请初审通过，请上传签字盖章版本",
+            body=(
+                "您的场地申请已通过初审，请登录系统上传签字盖章版本材料。\n\n"
+                f"{format_application_label(application)}"
+            ),
+        )
+    else:
+        await notification_service.notify_admins(
+            db=db,
+            application=application,
+            notification_type="pending_admin_pre_review",
+            subject="有申请需要管理员初审",
+            body=(
+                "AI 初审未通过或存在需要人工确认的问题，申请已进入待管理员初审状态。\n\n"
+                f"{format_application_label(application)}\n\n"
+                f"问题摘要：\n{summarize_review_problems(issues, conflicts) or '无'}"
+            ),
+        )
 
-        await db.commit()
-        application_id = application.id
+    await db.commit()
 
     return ApplicationPreReviewResponse(
         passed=passed,
         application_type=application_type,
         venue_id=venue_id,
-        next_status="pending_signed_files" if passed else "pre_review_failed",
+        next_status="pending_signed_files" if passed else "pending_admin_pre_review",
         extracted_time_slots=ai_result.extracted_time_slots,
         issues=issues,
         conflicts=conflicts,

@@ -13,6 +13,7 @@ from app.models.key import KeyBorrowRecord, KeyResource
 from app.models.user import User
 from app.schemas.key import KeyBorrowResponse, KeyResourceRead
 from app.services.file_storage import file_storage_service
+from app.services.notification import notification_service
 
 router = APIRouter(prefix="/keys", tags=["keys"])
 
@@ -90,6 +91,19 @@ async def create_key_borrow_application(
             borrowed_at=borrowed_at,
             expected_return_at=expected_return_at,
         )
+    )
+    await notification_service.notify_admins(
+        db=db,
+        application=application,
+        notification_type="pending_admin_submit",
+        subject="有钥匙借用申请待管理员提交",
+        body=(
+            "用户已提交钥匙借用申请，申请进入待管理员提交状态。\n\n"
+            f"申请编号：{application.id}\n"
+            f"钥匙编号：{key_id}\n"
+            f"申请人：{application.applicant_name or '未填写'}\n"
+            f"申请部门：{application.applicant_department or '未填写'}"
+        ),
     )
     await db.commit()
 
