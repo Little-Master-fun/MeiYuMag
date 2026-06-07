@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     smtp_password: str | None = None
     smtp_from: str | None = None
 
+    ai_api_base_url: str | None = None
+    ai_api_key: str | None = None
+    ai_model: str = "Ali-dashscope/MiniMax-M2.5"
+    ai_timeout_seconds: float = 60
+
     sdu_auth_base_url: str = "https://pass.sdu.edu.cn"
     sdu_service_url: str = "https://service.sdu.edu.cn/tp_up/view?m=up"
 

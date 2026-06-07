@@ -17,6 +17,14 @@ Copy environment variables:
 cp .env.example .env
 ```
 
+Set local secrets in `.env`. The AI pre-review service uses an OpenAI-compatible chat completions endpoint:
+
+```env
+AI_API_BASE_URL=https://xplt.sdu.edu.cn:4000
+AI_API_KEY=your-api-key
+AI_MODEL=Ali-dashscope/MiniMax-M2.5
+```
+
 Run locally:
 
 ```sh

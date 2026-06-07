@@ -1,5 +1,12 @@
+import json
+import re
+from datetime import datetime
+from typing import Any
+
+import httpx
 from fastapi import UploadFile
 
+from app.core.config import settings
 from app.schemas.application import AiPreReviewResult, ReviewIssue
 from app.services.word_parser import word_parser_service
 
@@ -12,36 +19,183 @@ class AiReviewService:
     ) -> AiPreReviewResult:
         prompt = self.build_prompt(application_type)
         document_text = await word_parser_service.extract_text(file)
-        # TODO: call the configured AI provider with prompt and document_text.
-        # The AI should return structured JSON matching AiPreReviewResult.
-        return AiPreReviewResult(
-            passed=False,
-            raw_result={"prompt": prompt, "document_text_preview": document_text[:1000]},
-            issues=[
-                ReviewIssue(
-                    type="AI_REVIEW_NOT_CONFIGURED",
-                    message="AI pre-review is not configured yet. Word text extraction succeeded.",
-                )
+        if not settings.ai_api_base_url or not settings.ai_api_key:
+            return AiPreReviewResult(
+                passed=False,
+                raw_result={"prompt": prompt, "document_text_preview": document_text[:1000]},
+                issues=[
+                    ReviewIssue(
+                        type="AI_REVIEW_NOT_CONFIGURED",
+                        message="AI pre-review is not configured yet. Word text extraction succeeded.",
+                    )
+                ],
+            )
+
+        try:
+            raw_result = await self.call_chat_completion(prompt, document_text)
+        except Exception as exc:
+            return AiPreReviewResult(
+                passed=False,
+                raw_result={"prompt": prompt, "document_text_preview": document_text[:1000]},
+                issues=[
+                    ReviewIssue(
+                        type="AI_REVIEW_REQUEST_FAILED",
+                        message=f"AI 初审请求失败：{exc}",
+                    )
+                ],
+            )
+        return self.parse_ai_result(raw_result)
+
+    async def call_chat_completion(self, prompt: str, document_text: str) -> dict[str, Any]:
+        base_url = settings.ai_api_base_url.rstrip("/")
+        url = f"{base_url}/v1/chat/completions"
+        payload: dict[str, Any] = {
+            "model": settings.ai_model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是场地申请材料初审助手。你只能返回一个 JSON 对象，"
+                        "不要返回 Markdown，不要添加解释文字。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"{prompt}\n\nWord 文本如下：\n{document_text}",
+                },
             ],
-        )
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+        }
+        headers = {"Authorization": f"Bearer {settings.ai_api_key}"}
+
+        async with httpx.AsyncClient(timeout=settings.ai_timeout_seconds) as client:
+            response = await client.post(url, json=payload, headers=headers)
+            if response.status_code == 400:
+                payload.pop("response_format", None)
+                response = await client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+            return response.json()
+
+    def parse_ai_result(self, raw_result: dict[str, Any]) -> AiPreReviewResult:
+        try:
+            content = raw_result["choices"][0]["message"]["content"]
+            parsed = self.loads_json_object(content)
+            normalized = self.normalize_result(parsed)
+            normalized["raw_result"] = parsed
+            return AiPreReviewResult.model_validate(normalized)
+        except Exception as exc:
+            return AiPreReviewResult(
+                passed=False,
+                raw_result=raw_result,
+                issues=[
+                    ReviewIssue(
+                        type="AI_RESPONSE_PARSE_FAILED",
+                        message=f"AI 初审结果解析失败：{exc}",
+                    )
+                ],
+            )
+
+    def loads_json_object(self, content: str) -> dict[str, Any]:
+        content = content.strip()
+        fence_match = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", content, flags=re.S | re.I)
+        if fence_match is not None:
+            content = fence_match.group(1).strip()
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            unescaped_quotes = content.replace('\\\\"', '"').replace('\\"', '"')
+            for candidate in (unescaped_quotes, content.encode().decode("unicode_escape")):
+                if candidate == content:
+                    continue
+                try:
+                    parsed = json.loads(candidate)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(parsed, dict):
+                    return parsed
+            match = re.search(r"\{.*\}", content, flags=re.S)
+            if match is None:
+                raise
+            parsed = json.loads(match.group(0))
+        if not isinstance(parsed, dict):
+            raise ValueError("AI response is not a JSON object")
+        return parsed
+
+    def normalize_result(self, parsed: dict[str, Any]) -> dict[str, Any]:
+        issues = parsed.get("issues") or []
+        normalized_issues = [
+            {
+                "type": str(issue.get("type") or "AI_REVIEW_ISSUE"),
+                "message": str(issue.get("message") or issue),
+            }
+            if isinstance(issue, dict)
+            else {"type": "AI_REVIEW_ISSUE", "message": str(issue)}
+            for issue in issues
+        ]
+
+        time_slots = parsed.get("extracted_time_slots") or parsed.get("time_slots") or []
+        normalized_slots = []
+        for slot in time_slots:
+            if not isinstance(slot, dict):
+                continue
+            date_value = str(slot.get("date") or "")
+            start_time = str(slot.get("start_time") or "")
+            end_time = str(slot.get("end_time") or "")
+            normalized_slots.append(
+                {
+                    "date": date_value,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "start_at": self.combine_datetime(date_value, start_time),
+                    "end_at": self.combine_datetime(date_value, end_time),
+                }
+            )
+
+        return {
+            "passed": bool(parsed.get("passed")) and not normalized_issues,
+            "venue_name": parsed.get("venue_name"),
+            "organization": parsed.get("organization"),
+            "applicant_name": parsed.get("applicant_name"),
+            "extracted_time_slots": normalized_slots,
+            "issues": normalized_issues,
+        }
+
+    def combine_datetime(self, date_value: str, time_value: str) -> datetime | None:
+        if not date_value or not time_value:
+            return None
+        for fmt in ("%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M"):
+            try:
+                return datetime.strptime(f"{date_value} {time_value}", fmt)
+            except ValueError:
+                continue
+        return None
 
     def build_prompt(self, application_type: str) -> str:
         if application_type == "meiyu_venue":
             return (
                 "你是山东大学美育场地申请初审助手。请从 Word 申请文件中提取申请房间、"
                 "申请组织、申请人、借用日期和具体时间段。只检查文件信息是否完整，"
-                "不要判断数据库时间冲突，冲突由后端系统处理。请返回 JSON。"
+                "不要判断数据库时间冲突，冲突由后端系统处理。请严格返回 JSON，格式为："
+                "{\"passed\": true, \"venue_name\": \"\", \"organization\": \"\", "
+                "\"applicant_name\": \"\", \"extracted_time_slots\": "
+                "[{\"date\": \"YYYY-MM-DD\", \"start_time\": \"HH:mm\", "
+                "\"end_time\": \"HH:mm\"}], \"issues\": []}。"
             )
         if application_type == "yueyuan_third_floor":
             return (
                 "你是山东大学悦园三楼申请策划书初审助手。请检查首页是否包含精确到分钟的"
                 "借用时间，例如 12:00-19:10；一次申请是否最多 3 天；多天借用是否不为"
                 "连续自然日；正文活动安排时间是否与首页一致。不要判断数据库时间冲突，"
-                "冲突由后端系统处理。请返回 JSON。"
+                "冲突由后端系统处理。请严格返回 JSON，格式为："
+                "{\"passed\": true, \"venue_name\": \"悦园三楼\", \"organization\": \"\", "
+                "\"applicant_name\": \"\", \"extracted_time_slots\": "
+                "[{\"date\": \"YYYY-MM-DD\", \"start_time\": \"HH:mm\", "
+                "\"end_time\": \"HH:mm\"}], \"issues\": []}。"
             )
         return (
             "请从申请文件中提取申请对象、申请组织、申请人、借用日期和具体时间段。"
-            "请返回 JSON。"
+            "请严格返回 JSON。"
         )
 
 
