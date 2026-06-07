@@ -20,6 +20,7 @@ class AiPreReviewResult(BaseModel):
     passed: bool
     venue_name: str | None = None
     organization: str | None = None
+    purpose_summary: str | None = None
     applicant_name: str | None = None
     extracted_time_slots: list[ExtractedTimeSlot] = []
     issues: list[ReviewIssue] = []
@@ -44,6 +45,7 @@ class ApplicationPreReviewResponse(BaseModel):
     issues: list[ReviewIssue]
     conflicts: list[ConflictItem]
     application_id: int | None = None
+    purpose_summary: str | None = None
 
 
 class ApplicationRead(BaseModel):
@@ -51,6 +53,7 @@ class ApplicationRead(BaseModel):
     user_id: int
     application_type: str
     organization: str | None
+    purpose_summary: str | None
     applicant_name: str | None
     applicant_sduid: str | None
     applicant_department: str | None

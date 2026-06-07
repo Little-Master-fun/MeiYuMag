@@ -279,6 +279,7 @@ async def submit_pre_review(
             user_id=current_user.id,
             application_type=application_type,
             organization=ai_result.organization or current_user.department,
+            purpose_summary=ai_result.purpose_summary,
             applicant_name=auth_profile.name if auth_profile else None,
             applicant_sduid=auth_profile.sduid if auth_profile else None,
             applicant_department=current_user.department,
@@ -326,4 +327,5 @@ async def submit_pre_review(
         issues=issues,
         conflicts=conflicts,
         application_id=application_id,
+        purpose_summary=ai_result.purpose_summary,
     )

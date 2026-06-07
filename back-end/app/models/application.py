@@ -13,6 +13,7 @@ class Application(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     application_type: Mapped[str] = mapped_column(String(64), index=True)
     organization: Mapped[str | None] = mapped_column(String(255))
+    purpose_summary: Mapped[str | None] = mapped_column(Text)
     applicant_name: Mapped[str | None] = mapped_column(String(128))
     applicant_sduid: Mapped[str | None] = mapped_column(String(64))
     applicant_department: Mapped[str | None] = mapped_column(String(255))

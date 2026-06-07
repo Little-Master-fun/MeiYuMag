@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 from datetime import datetime
@@ -70,12 +71,16 @@ class AiReviewService:
         headers = {"Authorization": f"Bearer {settings.ai_api_key}"}
 
         async with httpx.AsyncClient(timeout=settings.ai_timeout_seconds) as client:
-            response = await client.post(url, json=payload, headers=headers)
-            if response.status_code == 400:
-                payload.pop("response_format", None)
+            for attempt in range(3):
                 response = await client.post(url, json=payload, headers=headers)
-            response.raise_for_status()
-            return response.json()
+                if response.status_code == 400 and "response_format" in payload:
+                    payload.pop("response_format", None)
+                    response = await client.post(url, json=payload, headers=headers)
+                if response.status_code not in {429, 500, 502, 503, 504} or attempt == 2:
+                    response.raise_for_status()
+                    return response.json()
+                await asyncio.sleep(2**attempt)
+        raise RuntimeError("AI request failed without a response")
 
     def parse_ai_result(self, raw_result: dict[str, Any]) -> AiPreReviewResult:
         try:
@@ -156,6 +161,7 @@ class AiReviewService:
             "passed": bool(parsed.get("passed")) and not normalized_issues,
             "venue_name": parsed.get("venue_name"),
             "organization": parsed.get("organization"),
+            "purpose_summary": parsed.get("purpose_summary") or parsed.get("activity_summary"),
             "applicant_name": parsed.get("applicant_name"),
             "extracted_time_slots": normalized_slots,
             "issues": normalized_issues,
@@ -175,10 +181,12 @@ class AiReviewService:
         if application_type == "meiyu_venue":
             return (
                 "你是山东大学美育场地申请初审助手。请从 Word 申请文件中提取申请房间、"
-                "申请组织、申请人、借用日期和具体时间段。只检查文件信息是否完整，"
+                "申请组织、申请人、场地用途简介、借用日期和具体时间段。"
+                "场地用途简介需要用 30-120 字概括本次借用用途，例如活动名称、活动性质、主要内容。"
+                "如果没有明确个人申请人姓名，applicant_name 返回 null。只检查文件信息是否完整，"
                 "不要判断数据库时间冲突，冲突由后端系统处理。请严格返回 JSON，格式为："
                 "{\"passed\": true, \"venue_name\": \"\", \"organization\": \"\", "
-                "\"applicant_name\": \"\", \"extracted_time_slots\": "
+                "\"purpose_summary\": \"\", \"applicant_name\": null, \"extracted_time_slots\": "
                 "[{\"date\": \"YYYY-MM-DD\", \"start_time\": \"HH:mm\", "
                 "\"end_time\": \"HH:mm\"}], \"issues\": []}。"
             )
@@ -187,14 +195,16 @@ class AiReviewService:
                 "你是山东大学悦园三楼申请策划书初审助手。请检查首页是否包含精确到分钟的"
                 "借用时间，例如 12:00-19:10；一次申请是否最多 3 天；多天借用是否不为"
                 "连续自然日；正文活动安排时间是否与首页一致。不要判断数据库时间冲突，"
+                "并请提取场地用途简介，用 30-120 字概括活动名称、活动性质、主要内容和借用用途。"
+                "如果没有明确个人申请人姓名，applicant_name 返回 null。"
                 "冲突由后端系统处理。请严格返回 JSON，格式为："
                 "{\"passed\": true, \"venue_name\": \"悦园三楼\", \"organization\": \"\", "
-                "\"applicant_name\": \"\", \"extracted_time_slots\": "
+                "\"purpose_summary\": \"\", \"applicant_name\": null, \"extracted_time_slots\": "
                 "[{\"date\": \"YYYY-MM-DD\", \"start_time\": \"HH:mm\", "
                 "\"end_time\": \"HH:mm\"}], \"issues\": []}。"
             )
         return (
-            "请从申请文件中提取申请对象、申请组织、申请人、借用日期和具体时间段。"
+            "请从申请文件中提取申请对象、申请组织、申请人、场地用途简介、借用日期和具体时间段。"
             "请严格返回 JSON。"
         )
 
