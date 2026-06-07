@@ -1,0 +1,8 @@
+anyio
+certifi
+h11
+httpcore
+httpx
+idna
+setuptools
+sniffio
