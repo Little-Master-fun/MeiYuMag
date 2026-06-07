@@ -1,6 +1,8 @@
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,11 +16,13 @@ from app.schemas.application import (
     ApplicationRead,
     ApplicationPreReviewResponse,
     ConflictItem,
+    ApplicationFileRead,
     GenericFileUploadResponse,
     ReviewIssue,
     SignedFilesSubmitResponse,
     UploadedSignedFile,
 )
+from app.core.config import settings
 from app.services.ai_review import ai_review_service
 from app.services.file_storage import file_storage_service
 from app.services.notification import notification_service
@@ -113,6 +117,70 @@ async def list_my_applications(
     query = query.order_by(Application.created_at.desc())
     result = await db.execute(query)
     return [ApplicationRead.model_validate(item) for item in result.scalars()]
+
+
+async def get_owned_application_or_admin(
+    db: AsyncSession,
+    application_id: int,
+    current_user: User,
+) -> Application:
+    application = await db.get(Application, application_id)
+    if application is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
+    if application.user_id != current_user.id and current_user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied")
+    return application
+
+
+@router.get("/{application_id}/files", response_model=list[ApplicationFileRead])
+async def list_application_files(
+    application_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[ApplicationFileRead]:
+    await get_owned_application_or_admin(db, application_id, current_user)
+    result = await db.execute(
+        select(ApplicationFile)
+        .where(ApplicationFile.application_id == application_id)
+        .order_by(ApplicationFile.file_type, ApplicationFile.version.desc())
+    )
+    files = []
+    for item in result.scalars():
+        files.append(
+            ApplicationFileRead(
+                id=item.id,
+                application_id=item.application_id,
+                file_type=item.file_type,
+                version=item.version,
+                original_filename=item.original_filename,
+                review_status=item.review_status,
+                reject_reason=item.reject_reason,
+                created_at=item.created_at,
+                download_url=(
+                    f"{settings.api_v1_prefix}/applications/"
+                    f"{application_id}/files/{item.id}/download"
+                ),
+            )
+        )
+    return files
+
+
+@router.get("/{application_id}/files/{file_id}/download")
+async def download_application_file(
+    application_id: int,
+    file_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> FileResponse:
+    await get_owned_application_or_admin(db, application_id, current_user)
+    application_file = await db.get(ApplicationFile, file_id)
+    if application_file is None or application_file.application_id != application_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+
+    file_path = Path(application_file.stored_path)
+    if not file_path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Stored file not found")
+    return FileResponse(path=file_path, filename=application_file.original_filename)
 
 
 @router.post("/{application_id}/files", response_model=GenericFileUploadResponse)
@@ -378,6 +446,18 @@ async def submit_pre_review(
             ),
         )
     else:
+        for slot in ai_result.extracted_time_slots:
+            if slot.start_at is None or slot.end_at is None:
+                continue
+            db.add(
+                ReservationCalendar(
+                    venue_id=venue_id,
+                    application_id=application.id,
+                    start_at=slot.start_at,
+                    end_at=slot.end_at,
+                    status="pending_admin_pre_review",
+                )
+            )
         await notification_service.notify_admins(
             db=db,
             application=application,

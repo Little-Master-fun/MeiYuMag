@@ -68,6 +68,20 @@ class ApplicationRead(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ApplicationFileRead(BaseModel):
+    id: int
+    application_id: int
+    file_type: str
+    version: int
+    original_filename: str
+    review_status: str
+    reject_reason: str | None
+    created_at: datetime
+    download_url: str
+
+    model_config = {"from_attributes": True}
+
+
 class UploadedSignedFile(BaseModel):
     file_type: str
     version: int
@@ -98,3 +112,18 @@ class GenericFileUploadResponse(BaseModel):
     application_id: int
     status: str
     uploaded_file: UploadedSignedFile
+
+
+class AdminApplicationStatusUpdate(BaseModel):
+    status: str = Field(
+        description=(
+            "Supported values: pending_signed_files, pending_admin_submit, "
+            "submitted, completed, cancelled, rejected"
+        )
+    )
+    reason: str | None = Field(default=None, max_length=1000)
+
+
+class AdminPreReviewDecision(BaseModel):
+    passed: bool
+    reason: str | None = Field(default=None, max_length=1000)

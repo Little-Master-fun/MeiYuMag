@@ -10,15 +10,57 @@ from app.db.session import get_db
 from app.models.application import Application, ApplicationFile
 from app.models.notification import NotificationLog
 from app.models.user import User
+from app.models.venue import ReservationCalendar
 from app.schemas.application import (
+    AdminApplicationStatusUpdate,
+    AdminPreReviewDecision,
     ApplicationRead,
     SupplementRequest,
     SupplementRequestResponse,
 )
-from app.schemas.auth import UserRead
+from app.schemas.auth import UserRead, UserUpdateRequest
 from app.services.email import email_service
+from app.services.expiration import expiration_service
+from app.services.notification import notification_service
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+ADMIN_SETTABLE_APPLICATION_STATUSES = {
+    "pending_signed_files",
+    "pending_admin_submit",
+    "submitted",
+    "completed",
+    "cancelled",
+    "rejected",
+}
+
+
+async def update_reservation_statuses(
+    db: AsyncSession,
+    application_id: int,
+    reservation_status: str,
+) -> None:
+    result = await db.execute(
+        select(ReservationCalendar).where(ReservationCalendar.application_id == application_id)
+    )
+    for reservation in result.scalars():
+        reservation.status = reservation_status
+
+
+async def latest_application_file(
+    db: AsyncSession,
+    application_id: int,
+    file_type: str,
+) -> ApplicationFile | None:
+    result = await db.execute(
+        select(ApplicationFile)
+        .where(
+            ApplicationFile.application_id == application_id,
+            ApplicationFile.file_type == file_type,
+        )
+        .order_by(ApplicationFile.version.desc())
+    )
+    return result.scalars().first()
 
 
 @router.get("/applications", response_model=list[ApplicationRead])
@@ -36,6 +78,83 @@ async def list_all_applications(
     query = query.order_by(Application.created_at.desc())
     result = await db.execute(query)
     return [ApplicationRead.model_validate(item) for item in result.scalars()]
+
+
+@router.patch("/applications/{application_id}/status", response_model=ApplicationRead)
+async def update_application_status(
+    application_id: int,
+    payload: AdminApplicationStatusUpdate,
+    current_admin: Annotated[User, Depends(get_current_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ApplicationRead:
+    application = await db.get(Application, application_id)
+    if application is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
+    if payload.status not in ADMIN_SETTABLE_APPLICATION_STATUSES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported status")
+
+    application.status = payload.status
+    if payload.status in {"submitted", "completed"} and application.venue_id is not None:
+        await update_reservation_statuses(db, application_id, "confirmed")
+    elif payload.status in {"cancelled", "rejected"} and application.venue_id is not None:
+        await update_reservation_statuses(db, application_id, "cancelled")
+    if payload.reason:
+        pre_review_file = await latest_application_file(db, application_id, "pre_review_word")
+        if pre_review_file is not None:
+            pre_review_file.reject_reason = payload.reason
+
+    await db.commit()
+    await db.refresh(application)
+    return ApplicationRead.model_validate(application)
+
+
+@router.post("/applications/{application_id}/pre-review-decision", response_model=ApplicationRead)
+async def decide_pre_review_application(
+    application_id: int,
+    payload: AdminPreReviewDecision,
+    current_admin: Annotated[User, Depends(get_current_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ApplicationRead:
+    application = await db.get(Application, application_id)
+    if application is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
+    if application.status != "pending_admin_pre_review":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Application is not waiting for admin pre-review",
+        )
+
+    pre_review_file = await latest_application_file(db, application_id, "pre_review_word")
+    if payload.passed:
+        application.status = "pending_signed_files"
+        if pre_review_file is not None:
+            pre_review_file.review_status = "passed"
+            pre_review_file.reject_reason = None
+        await update_reservation_statuses(db, application_id, "pre_reserved")
+        user = await db.get(User, application.user_id)
+        if user is not None:
+            await notification_service.send_and_log(
+                db=db,
+                application_id=application.id,
+                recipients=[user.email],
+                notification_type="pre_review_passed",
+                subject="场地申请初审通过，请上传签字盖章版本",
+                body=(
+                    "您的场地申请已由管理员初审通过，请登录系统上传签字盖章版本材料。\n\n"
+                    f"申请编号：{application.id}\n"
+                    f"申请组织：{application.organization or '未填写'}"
+                ),
+            )
+    else:
+        application.status = "rejected"
+        if pre_review_file is not None:
+            pre_review_file.review_status = "rejected"
+            pre_review_file.reject_reason = payload.reason
+        await update_reservation_statuses(db, application_id, "cancelled")
+
+    await db.commit()
+    await db.refresh(application)
+    return ApplicationRead.model_validate(application)
 
 
 @router.post("/applications/{application_id}/request-supplement")
@@ -118,3 +237,43 @@ async def allow_user_application(
     await db.commit()
     await db.refresh(user)
     return UserRead.model_validate(user)
+
+
+@router.get("/users", response_model=list[UserRead])
+async def list_users(
+    current_admin: Annotated[User, Depends(get_current_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    role: str | None = None,
+) -> list[UserRead]:
+    query = select(User).order_by(User.created_at.desc())
+    if role:
+        query = query.where(User.role == role)
+    result = await db.execute(query)
+    return [UserRead.model_validate(user) for user in result.scalars()]
+
+
+@router.patch("/users/{user_id}", response_model=UserRead)
+async def update_user(
+    user_id: int,
+    payload: UserUpdateRequest,
+    current_admin: Annotated[User, Depends(get_current_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> UserRead:
+    user = await db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    if payload.role is not None:
+        user.role = payload.role
+    if payload.is_application_allowed is not None:
+        user.is_application_allowed = payload.is_application_allowed
+    await db.commit()
+    await db.refresh(user)
+    return UserRead.model_validate(user)
+
+
+@router.post("/maintenance/process-expirations")
+async def process_application_expirations(
+    current_admin: Annotated[User, Depends(get_current_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, int]:
+    return await expiration_service.process_yueyuan_pending_signed_files(db)

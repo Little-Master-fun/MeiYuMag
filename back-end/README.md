@@ -259,6 +259,7 @@ When pre-review passes, the application stores a snapshot of:
 - applicant SDU ID from `AuthProfile`
 - applicant department from `User.department`
 - organization extracted by AI, falling back to `User.department`
+- purpose summary extracted by AI
 
 User application list:
 
@@ -323,6 +324,15 @@ file=<supplement file>
 
 This endpoint is only available when the application status is `supplement_required`.
 
+Application file list and download:
+
+```text
+GET /api/v1/applications/{application_id}/files
+GET /api/v1/applications/{application_id}/files/{file_id}/download
+```
+
+Only the application owner or an administrator can access uploaded files.
+
 ## Key Borrowing
 
 Key resource list:
@@ -350,6 +360,14 @@ file=<key borrowing application file>
 
 The endpoint creates an application with `application_type=key_borrow`, stores the uploaded file, and creates a `KeyBorrowRecord`.
 
+Admin key borrowing operations:
+
+```text
+PATCH /api/v1/keys/{key_id}
+POST /api/v1/keys/borrow-records/{application_id}/checkout
+POST /api/v1/keys/borrow-records/{application_id}/return
+```
+
 ## Admin APIs
 
 Admin application list:
@@ -358,6 +376,36 @@ Admin application list:
 GET /api/v1/admin/applications
 GET /api/v1/admin/applications?status_filter=pending_admin_submit
 GET /api/v1/admin/applications?application_type=meiyu_venue
+```
+
+Update application status:
+
+```text
+PATCH /api/v1/admin/applications/{application_id}/status
+```
+
+Supported statuses:
+
+```text
+pending_signed_files
+pending_admin_submit
+submitted
+completed
+cancelled
+rejected
+```
+
+Handle applications waiting for admin pre-review:
+
+```text
+POST /api/v1/admin/applications/{application_id}/pre-review-decision
+```
+
+```json
+{
+  "passed": true,
+  "reason": "人工确认材料可通过初审。"
+}
 ```
 
 Request supplement files and notify the user:
@@ -379,6 +427,31 @@ Manually allow an unverified user to apply:
 POST /api/v1/admin/users/{user_id}/allow-application
 ```
 
+User management:
+
+```text
+GET /api/v1/admin/users
+PATCH /api/v1/admin/users/{user_id}
+```
+
+Run Yueyuan third floor pending-file expiration checks:
+
+```text
+POST /api/v1/admin/maintenance/process-expirations
+```
+
+For scheduled execution, run this command from the backend directory via cron:
+
+```sh
+conda run -n fastapi python -m app.tasks.process_expirations
+```
+
+Seed venues, key resources, and optional initial admin:
+
+```sh
+conda run -n fastapi python -m app.db.seed
+```
+
 Current parser support:
 
 - `.docx`: supported, including paragraphs and table text.
@@ -391,7 +464,7 @@ Response shape:
   "passed": false,
   "application_type": "yueyuan_third_floor",
   "venue_id": 1,
-  "next_status": "pre_review_failed",
+  "next_status": "pending_admin_pre_review",
   "extracted_time_slots": [
     {
       "date": "2026-06-12",
@@ -412,6 +485,7 @@ Response shape:
       "message": "申请时间与已有预约冲突"
     }
   ],
-  "application_id": null
+  "application_id": 1002,
+  "purpose_summary": "用于举办学院文艺汇演活动。"
 }
 ```

@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     smtp_from: str | None = None
     admin_notification_email_csv: str = ""
 
+    initial_admin_email: str | None = None
+    initial_admin_password: str | None = None
+
     ai_api_base_url: str | None = None
     ai_api_key: str | None = None
     ai_model: str = "Ali-dashscope/MiniMax-M2.5"

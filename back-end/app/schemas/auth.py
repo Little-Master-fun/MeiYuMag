@@ -34,3 +34,8 @@ class UserRead(BaseModel):
 
 class AuthResponse(TokenPair):
     user: UserRead
+
+
+class UserUpdateRequest(BaseModel):
+    role: str | None = Field(default=None, pattern="^(user|admin)$")
+    is_application_allowed: bool | None = None

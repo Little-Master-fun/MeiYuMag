@@ -25,6 +25,7 @@ def calendar_color(status: str) -> str:
         "confirmed": "#2563eb",
         "reserved": "#2563eb",
         "supplement_required": "#dc2626",
+        "pending_admin_pre_review": "#9333ea",
     }.get(status, "#64748b")
 
 
@@ -72,6 +73,7 @@ async def get_venue_calendar(
                 ReservationCalendar.venue_id == venue_id,
                 ReservationCalendar.start_at < next_month_dt,
                 ReservationCalendar.end_at >= month_start_dt,
+                ReservationCalendar.status != "cancelled",
             )
         )
         .order_by(ReservationCalendar.start_at)
@@ -126,5 +128,6 @@ async def get_venue_calendar(
             CalendarStatusLegendItem(status="pre_reserved", label="预占用", color="#f59e0b"),
             CalendarStatusLegendItem(status="confirmed", label="已预约", color="#2563eb"),
             CalendarStatusLegendItem(status="supplement_required", label="待补交", color="#dc2626"),
+            CalendarStatusLegendItem(status="pending_admin_pre_review", label="待管理员初审", color="#9333ea"),
         ],
     )

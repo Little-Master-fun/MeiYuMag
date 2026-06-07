@@ -1,17 +1,23 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_admin, get_current_user
 from app.db.session import get_db
 from app.models.application import Application, ApplicationFile
 from app.models.auth_profile import AuthProfile
 from app.models.key import KeyBorrowRecord, KeyResource
 from app.models.user import User
-from app.schemas.key import KeyBorrowResponse, KeyResourceRead
+from app.schemas.key import (
+    KeyBorrowResponse,
+    KeyCheckoutResponse,
+    KeyResourceRead,
+    KeyResourceUpdate,
+    KeyReturnResponse,
+)
 from app.services.file_storage import file_storage_service
 from app.services.notification import notification_service
 
@@ -24,6 +30,27 @@ ALLOWED_KEY_FILE_SUFFIXES = {".doc", ".docx", ".pdf", ".jpg", ".jpeg", ".png"}
 async def list_keys(db: AsyncSession = Depends(get_db)) -> list[KeyResourceRead]:
     result = await db.execute(select(KeyResource).order_by(KeyResource.name))
     return [KeyResourceRead.model_validate(key) for key in result.scalars()]
+
+
+@router.patch("/{key_id}", response_model=KeyResourceRead)
+async def update_key_resource(
+    key_id: int,
+    payload: KeyResourceUpdate,
+    current_admin: Annotated[User, Depends(get_current_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> KeyResourceRead:
+    key = await db.get(KeyResource, key_id)
+    if key is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Key resource not found")
+    if payload.name is not None:
+        key.name = payload.name
+    if payload.room_name is not None:
+        key.room_name = payload.room_name
+    if payload.status is not None:
+        key.status = payload.status
+    await db.commit()
+    await db.refresh(key)
+    return KeyResourceRead.model_validate(key)
 
 
 @router.post("/borrow", response_model=KeyBorrowResponse)
@@ -114,4 +141,63 @@ async def create_key_borrow_application(
         borrowed_at=borrowed_at,
         expected_return_at=expected_return_at,
         uploaded_file_version=1,
+    )
+
+
+async def get_key_borrow_record_or_404(
+    db: AsyncSession,
+    application_id: int,
+) -> tuple[Application, KeyBorrowRecord, KeyResource]:
+    application = await db.get(Application, application_id)
+    if application is None or application.application_type != "key_borrow":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Key application not found")
+    result = await db.execute(
+        select(KeyBorrowRecord).where(KeyBorrowRecord.application_id == application_id)
+    )
+    record = result.scalar_one_or_none()
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Key record not found")
+    key = await db.get(KeyResource, record.key_id)
+    if key is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Key resource not found")
+    return application, record, key
+
+
+@router.post("/borrow-records/{application_id}/checkout", response_model=KeyCheckoutResponse)
+async def checkout_key(
+    application_id: int,
+    current_admin: Annotated[User, Depends(get_current_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> KeyCheckoutResponse:
+    application, record, key = await get_key_borrow_record_or_404(db, application_id)
+    borrowed_at = record.borrowed_at or datetime.now(timezone.utc)
+    record.borrowed_at = borrowed_at
+    key.status = "borrowed"
+    application.status = "submitted"
+    await db.commit()
+    return KeyCheckoutResponse(
+        application_id=application.id,
+        key_id=key.id,
+        key_status=key.status,
+        borrowed_at=borrowed_at,
+    )
+
+
+@router.post("/borrow-records/{application_id}/return", response_model=KeyReturnResponse)
+async def return_key(
+    application_id: int,
+    current_admin: Annotated[User, Depends(get_current_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> KeyReturnResponse:
+    application, record, key = await get_key_borrow_record_or_404(db, application_id)
+    returned_at = datetime.now(timezone.utc)
+    record.returned_at = returned_at
+    key.status = "available"
+    application.status = "completed"
+    await db.commit()
+    return KeyReturnResponse(
+        application_id=application.id,
+        key_id=key.id,
+        key_status=key.status,
+        returned_at=returned_at,
     )
