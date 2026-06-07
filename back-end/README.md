@@ -37,6 +37,17 @@ API docs:
 http://127.0.0.1:8000/docs
 ```
 
+## Application Templates
+
+Front-end clients can fetch downloadable application templates from:
+
+```text
+GET /api/v1/templates
+GET /api/v1/templates/{template_id}/download
+```
+
+The list endpoint returns template metadata and a stable `download_url`.
+
 ## Structure
 
 ```text
