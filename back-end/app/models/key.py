@@ -22,5 +22,6 @@ class KeyBorrowRecord(Base):
     key_id: Mapped[int | None] = mapped_column(ForeignKey("key_resources.id"), index=True)
     application_id: Mapped[int] = mapped_column(ForeignKey("applications.id"), index=True)
     borrowed_key_name: Mapped[str | None] = mapped_column(String(255))
+    borrow_organization: Mapped[str | None] = mapped_column(String(255))
     borrowed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     expected_return_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

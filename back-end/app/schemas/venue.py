@@ -20,6 +20,7 @@ class CalendarEvent(BaseModel):
     application_type: str
     title: str
     organization: str | None = None
+    borrow_organization: str | None = None
     applicant_name: str | None = None
     start_at: datetime
     end_at: datetime

@@ -57,6 +57,7 @@ def upgrade() -> None:
         sa.Column("user_id", sa.Integer(), sa.ForeignKey("users.id"), nullable=False),
         sa.Column("application_type", sa.String(length=64), nullable=False),
         sa.Column("organization", sa.String(length=255), nullable=True),
+        sa.Column("borrow_organization", sa.String(length=255), nullable=True),
         sa.Column("applicant_name", sa.String(length=128), nullable=True),
         sa.Column("applicant_sduid", sa.String(length=64), nullable=True),
         sa.Column("applicant_department", sa.String(length=255), nullable=True),
@@ -129,6 +130,7 @@ def upgrade() -> None:
         sa.Column("key_id", sa.Integer(), sa.ForeignKey("key_resources.id"), nullable=True),
         sa.Column("application_id", sa.Integer(), sa.ForeignKey("applications.id"), nullable=False),
         sa.Column("borrowed_key_name", sa.String(length=255), nullable=True),
+        sa.Column("borrow_organization", sa.String(length=255), nullable=True),
         sa.Column("borrowed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("expected_return_at", sa.DateTime(timezone=True), nullable=True),
     )

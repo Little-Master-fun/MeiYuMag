@@ -258,7 +258,8 @@ When pre-review passes, the application stores a snapshot of:
 - applicant name from `AuthProfile`
 - applicant SDU ID from `AuthProfile`
 - applicant department from `User.department`
-- organization extracted by AI, falling back to `User.department`
+- borrow organization extracted by AI
+- legacy `organization`, synchronized from borrow organization for list/calendar display
 - purpose summary extracted by AI
 
 User application list:
@@ -355,7 +356,7 @@ Form fields:
 file=<PDF scanned key borrowing application>
 ```
 
-The endpoint extracts readable PDF text, sends it to AI, stores the borrowed key name and borrowing time in `KeyBorrowRecord`, stores the uploaded PDF, and creates an application with `application_type=key_borrow` and `status=pending_admin_submit`.
+The endpoint extracts readable PDF text, sends it to AI, stores the borrow organization, borrowed key name, and borrowing time in `KeyBorrowRecord`, stores the uploaded PDF, and creates an application with `application_type=key_borrow` and `status=pending_admin_submit`.
 
 ## Admin APIs
 

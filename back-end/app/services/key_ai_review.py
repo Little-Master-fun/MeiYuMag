@@ -20,10 +20,12 @@ class KeyAiReviewService:
 
         prompt = (
             "你是山东大学钥匙借用申请信息提取助手。请从 PDF 申请文本中提取："
-            "1. 借用的钥匙名称或房间名称；2. 借用开始时间；3. 预计归还时间。"
+            "1. 借用组织；2. 借用的钥匙名称或房间名称；3. 借用开始时间；4. 预计归还时间。"
+            "借用组织是实际借用钥匙的组织、社团、学院或部门。"
             "如果只有借用日期和时间段，请组合成完整时间。"
             "请严格返回 JSON，格式为："
-            "{\"borrowed_key_name\": \"\", \"borrowed_at\": \"YYYY-MM-DDTHH:mm:ss\", "
+            "{\"borrow_organization\": \"\", \"borrowed_key_name\": \"\", "
+            "\"borrowed_at\": \"YYYY-MM-DDTHH:mm:ss\", "
             "\"expected_return_at\": \"YYYY-MM-DDTHH:mm:ss\", \"issues\": []}。"
         )
         try:
@@ -41,6 +43,7 @@ class KeyAiReviewService:
             parsed = ai_review_service.loads_json_object(content)
             return KeyBorrowAiResult(
                 borrowed_key_name=parsed.get("borrowed_key_name") or parsed.get("key_name"),
+                borrow_organization=parsed.get("borrow_organization") or parsed.get("organization"),
                 borrowed_at=self.parse_datetime(parsed.get("borrowed_at")),
                 expected_return_at=self.parse_datetime(parsed.get("expected_return_at")),
                 issues=[str(issue) for issue in (parsed.get("issues") or [])],

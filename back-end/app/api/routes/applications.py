@@ -87,7 +87,7 @@ def format_application_label(application: Application) -> str:
     return (
         f"申请编号：{application.id}\n"
         f"申请类型：{application.application_type}\n"
-        f"申请组织：{application.organization or '未填写'}\n"
+        f"借用组织：{application.borrow_organization or application.organization or '未填写'}\n"
         f"申请人：{application.applicant_name or '未填写'}\n"
         f"申请部门：{application.applicant_department or '未填写'}"
     )
@@ -395,7 +395,8 @@ async def submit_pre_review(
     application = Application(
         user_id=current_user.id,
         application_type=application_type,
-        organization=ai_result.organization or current_user.department,
+        organization=ai_result.borrow_organization or ai_result.organization or current_user.department,
+        borrow_organization=ai_result.borrow_organization or ai_result.organization,
         purpose_summary=ai_result.purpose_summary,
         applicant_name=auth_profile.name if auth_profile else None,
         applicant_sduid=auth_profile.sduid if auth_profile else None,
@@ -481,5 +482,6 @@ async def submit_pre_review(
         issues=issues,
         conflicts=conflicts,
         application_id=application_id,
+        borrow_organization=ai_result.borrow_organization or ai_result.organization,
         purpose_summary=ai_result.purpose_summary,
     )

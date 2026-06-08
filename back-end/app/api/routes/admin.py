@@ -142,7 +142,7 @@ async def decide_pre_review_application(
                 body=(
                     "您的场地申请已由管理员初审通过，请登录系统上传签字盖章版本材料。\n\n"
                     f"申请编号：{application.id}\n"
-                    f"申请组织：{application.organization or '未填写'}"
+                    f"借用组织：{application.borrow_organization or application.organization or '未填写'}"
                 ),
             )
     else:

@@ -82,7 +82,13 @@ async def get_venue_calendar(
     events: list[CalendarEvent] = []
     for reservation, application in result.all():
         event_id = f"reservation-{reservation.id}"
-        title = application.organization if application and application.organization else "场地预约"
+        title = (
+            application.borrow_organization
+            if application and application.borrow_organization
+            else application.organization
+            if application and application.organization
+            else "场地预约"
+        )
         app_type = application.application_type if application else "unknown"
         event = CalendarEvent(
             id=event_id,
@@ -98,6 +104,7 @@ async def get_venue_calendar(
             status=reservation.status,
             occupancy_type=occupancy_type(reservation.status),
             color=calendar_color(reservation.status),
+            borrow_organization=application.borrow_organization if application else None,
         )
         events.append(event)
 

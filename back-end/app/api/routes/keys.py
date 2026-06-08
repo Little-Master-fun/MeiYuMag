@@ -80,7 +80,8 @@ async def create_key_borrow_application(
     application = Application(
         user_id=current_user.id,
         application_type="key_borrow",
-        organization=current_user.department,
+        organization=ai_result.borrow_organization or current_user.department,
+        borrow_organization=ai_result.borrow_organization,
         applicant_name=auth_profile.name if auth_profile else None,
         applicant_sduid=auth_profile.sduid if auth_profile else None,
         applicant_department=current_user.department,
@@ -105,6 +106,7 @@ async def create_key_borrow_application(
         KeyBorrowRecord(
             application_id=application.id,
             borrowed_key_name=ai_result.borrowed_key_name,
+            borrow_organization=ai_result.borrow_organization,
             borrowed_at=ai_result.borrowed_at,
             expected_return_at=ai_result.expected_return_at,
         )
@@ -117,6 +119,7 @@ async def create_key_borrow_application(
         body=(
             "用户已提交钥匙借用申请，申请进入待管理员提交状态。\n\n"
             f"申请编号：{application.id}\n"
+            f"借用组织：{ai_result.borrow_organization or 'AI 未提取到'}\n"
             f"借用钥匙：{ai_result.borrowed_key_name or 'AI 未提取到'}\n"
             f"借用时间：{ai_result.borrowed_at or 'AI 未提取到'}\n"
             f"预计归还：{ai_result.expected_return_at or 'AI 未提取到'}\n"
@@ -129,6 +132,7 @@ async def create_key_borrow_application(
     return KeyBorrowResponse(
         application_id=application.id,
         borrowed_key_name=ai_result.borrowed_key_name,
+        borrow_organization=ai_result.borrow_organization,
         status=application.status,
         borrowed_at=ai_result.borrowed_at,
         expected_return_at=ai_result.expected_return_at,

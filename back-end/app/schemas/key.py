@@ -15,6 +15,7 @@ class KeyResourceRead(BaseModel):
 class KeyBorrowResponse(BaseModel):
     application_id: int
     borrowed_key_name: str | None
+    borrow_organization: str | None
     status: str
     borrowed_at: datetime | None
     expected_return_at: datetime | None
@@ -30,6 +31,7 @@ class KeyResourceUpdate(BaseModel):
 
 class KeyBorrowAiResult(BaseModel):
     borrowed_key_name: str | None = None
+    borrow_organization: str | None = None
     borrowed_at: datetime | None = None
     expected_return_at: datetime | None = None
     issues: list[str] = []
