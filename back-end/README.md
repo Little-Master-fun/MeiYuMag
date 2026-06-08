@@ -69,6 +69,7 @@ System login uses JWT.
 POST /api/v1/auth/register
 POST /api/v1/auth/login
 POST /api/v1/auth/refresh
+POST /api/v1/auth/logout
 GET  /api/v1/auth/me
 ```
 
@@ -96,6 +97,7 @@ Authorization: Bearer <access_token>
 ```
 
 When the access token expires, call `/api/v1/auth/refresh` with the refresh token to get a new token pair.
+`/api/v1/auth/logout` is a stateless JWT logout endpoint. The backend verifies the current access token and returns `204`; the frontend should then remove the local access token and refresh token.
 
 `/auth/login` accepts a registered email, local account, or verified SDU ID:
 
@@ -270,6 +272,15 @@ GET /api/v1/applications?status_filter=pending_admin_submit
 ```
 
 `POST /api/v1/applications` is intentionally not used. Applications are created by specific workflows such as pre-review and key borrowing.
+
+User cancellation:
+
+```text
+POST   /api/v1/applications/{application_id}/cancel
+DELETE /api/v1/applications/{application_id}
+```
+
+Both endpoints perform a soft cancellation. The application record is kept, its status becomes `cancelled`, and related venue calendar entries are marked `cancelled` so the time is released. Users can cancel their own applications before the earliest usage start time, including applications already submitted successfully by an administrator. Cancelled, rejected, or completed applications cannot be cancelled again.
 
 ## Signed Files
 

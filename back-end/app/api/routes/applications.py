@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
 
@@ -130,6 +131,67 @@ async def get_owned_application_or_admin(
     if application.user_id != current_user.id and current_user.role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied")
     return application
+
+
+async def mark_application_cancelled(
+    db: AsyncSession,
+    application: Application,
+) -> Application:
+    if application.status == "cancelled":
+        return application
+    if application.status in {"rejected", "completed"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Application cannot be cancelled in its current status",
+        )
+    if application.start_at is not None and datetime.now(timezone.utc) >= application.start_at:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Application cannot be cancelled after the usage start time",
+        )
+
+    application.status = "cancelled"
+    result = await db.execute(
+        select(ReservationCalendar).where(
+            ReservationCalendar.application_id == application.id,
+            ReservationCalendar.status != "cancelled",
+        )
+    )
+    for reservation in result.scalars():
+        reservation.status = "cancelled"
+    await db.commit()
+    await db.refresh(application)
+    return application
+
+
+@router.post("/{application_id}/cancel", response_model=ApplicationRead)
+async def cancel_my_application(
+    application_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ApplicationRead:
+    application = await db.get(Application, application_id)
+    if application is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
+    if application.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied")
+    application = await mark_application_cancelled(db, application)
+    return ApplicationRead.model_validate(application)
+
+
+@router.delete("/{application_id}", response_model=ApplicationRead)
+async def delete_my_application(
+    application_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ApplicationRead:
+    application = await db.get(Application, application_id)
+    if application is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
+    if application.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied")
+    application = await mark_application_cancelled(db, application)
+    return ApplicationRead.model_validate(application)
 
 
 @router.get("/{application_id}/files", response_model=list[ApplicationFileRead])

@@ -492,6 +492,7 @@ http://127.0.0.1:8000/docs
 POST /api/v1/auth/register
 POST /api/v1/auth/login
 POST /api/v1/auth/refresh
+POST /api/v1/auth/logout
 GET  /api/v1/auth/me
 ```
 
@@ -502,6 +503,18 @@ Authorization: Bearer <access_token>
 ```
 
 `refresh_token` 用于在 access token 过期后刷新登录状态。
+
+`logout` 为无状态 JWT 登出接口，后端校验当前 access token 后返回成功，前端负责清除本地保存的 access token 和 refresh token。
+
+用户申请记录接口：
+
+```text
+GET    /api/v1/applications
+POST   /api/v1/applications/{application_id}/cancel
+DELETE /api/v1/applications/{application_id}
+```
+
+取消申请采用软取消：保留申请记录，将申请状态更新为已取消，并释放对应场地日历占用。只要还没有到达最早使用时间，即使申请已经由管理员确认提交，用户也可以取消自己的申请；已完成、已拒绝、已取消的申请不可再次取消。
 
 系统登录账号支持两种形式：
 
