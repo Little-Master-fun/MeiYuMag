@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,6 +17,7 @@ from app.models.user import User
 from app.schemas.auth import (
     AuthResponse,
     LoginRequest,
+    OrganizationUpdateRequest,
     RefreshTokenRequest,
     RegisterRequest,
     TokenPair,
@@ -103,13 +104,18 @@ async def refresh_token(
     return build_token_pair(user)
 
 
-@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-async def logout(
-    _current_user: Annotated[User, Depends(get_current_user)],
-) -> Response:
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-
 @router.get("/me", response_model=UserRead)
 async def read_me(current_user: Annotated[User, Depends(get_current_user)]) -> UserRead:
+    return UserRead.model_validate(current_user)
+
+
+@router.patch("/me/organization", response_model=UserRead)
+async def update_my_organization(
+    payload: OrganizationUpdateRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> UserRead:
+    current_user.department = payload.organization.strip()
+    await db.commit()
+    await db.refresh(current_user)
     return UserRead.model_validate(current_user)

@@ -492,8 +492,8 @@ http://127.0.0.1:8000/docs
 POST /api/v1/auth/register
 POST /api/v1/auth/login
 POST /api/v1/auth/refresh
-POST /api/v1/auth/logout
 GET  /api/v1/auth/me
+PATCH /api/v1/auth/me/organization
 ```
 
 登录成功后前端在后续请求中携带：
@@ -504,7 +504,17 @@ Authorization: Bearer <access_token>
 
 `refresh_token` 用于在 access token 过期后刷新登录状态。
 
-`logout` 为无状态 JWT 登出接口，后端校验当前 access token 后返回成功，前端负责清除本地保存的 access token 和 refresh token。
+退出登录由前端清除本地保存的 access token 和 refresh token 即可。
+
+用户可通过 `PATCH /api/v1/auth/me/organization` 修改自己的组织信息：
+
+```json
+{
+  "organization": "美育协会"
+}
+```
+
+后端将该值保存到 `User.department`，作为用户默认组织/部门信息。
 
 用户申请记录接口：
 

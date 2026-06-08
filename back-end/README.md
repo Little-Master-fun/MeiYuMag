@@ -69,8 +69,8 @@ System login uses JWT.
 POST /api/v1/auth/register
 POST /api/v1/auth/login
 POST /api/v1/auth/refresh
-POST /api/v1/auth/logout
 GET  /api/v1/auth/me
+PATCH /api/v1/auth/me/organization
 ```
 
 `register` and `login` return:
@@ -96,8 +96,23 @@ Authenticated requests should include:
 Authorization: Bearer <access_token>
 ```
 
-When the access token expires, call `/api/v1/auth/refresh` with the refresh token to get a new token pair.
-`/api/v1/auth/logout` is a stateless JWT logout endpoint. The backend verifies the current access token and returns `204`; the frontend should then remove the local access token and refresh token.
+When the access token expires, call `/api/v1/auth/refresh` with the refresh token to get a new token pair. Logout is handled by the frontend by removing the local access token and refresh token.
+
+Users can update their organization with:
+
+```http
+PATCH /api/v1/auth/me/organization
+Authorization: Bearer <access_token>
+Content-Type: application/json
+```
+
+```json
+{
+  "organization": "美育协会"
+}
+```
+
+The backend stores this value in `User.department`, which is used as the user's default organization/department information.
 
 `/auth/login` accepts a registered email, local account, or verified SDU ID:
 
