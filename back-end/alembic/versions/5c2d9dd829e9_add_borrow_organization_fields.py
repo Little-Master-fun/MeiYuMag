@@ -7,7 +7,6 @@ Create Date: 2026-06-08 11:16:23.840836
 from typing import Sequence, Union
 
 from alembic import op
-import sqlalchemy as sa
 
 
 
@@ -18,17 +17,17 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "applications",
-        sa.Column("borrow_organization", sa.String(length=255), nullable=True),
+    op.execute(
+        "ALTER TABLE applications "
+        "ADD COLUMN IF NOT EXISTS borrow_organization VARCHAR(255)"
     )
-    op.add_column(
-        "key_borrow_records",
-        sa.Column("borrow_organization", sa.String(length=255), nullable=True),
+    op.execute(
+        "ALTER TABLE key_borrow_records "
+        "ADD COLUMN IF NOT EXISTS borrow_organization VARCHAR(255)"
     )
     op.execute("UPDATE applications SET borrow_organization = organization")
 
 
 def downgrade() -> None:
-    op.drop_column("key_borrow_records", "borrow_organization")
-    op.drop_column("applications", "borrow_organization")
+    op.execute("ALTER TABLE key_borrow_records DROP COLUMN IF EXISTS borrow_organization")
+    op.execute("ALTER TABLE applications DROP COLUMN IF EXISTS borrow_organization")

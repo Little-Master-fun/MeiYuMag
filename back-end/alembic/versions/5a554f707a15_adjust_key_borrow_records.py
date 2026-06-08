@@ -18,18 +18,18 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "key_borrow_records",
-        sa.Column("borrowed_key_name", sa.String(length=255), nullable=True),
+    op.execute(
+        "ALTER TABLE key_borrow_records "
+        "ADD COLUMN IF NOT EXISTS borrowed_key_name VARCHAR(255)"
     )
     op.alter_column("key_borrow_records", "key_id", existing_type=sa.Integer(), nullable=True)
-    op.drop_column("key_borrow_records", "returned_at")
+    op.execute("ALTER TABLE key_borrow_records DROP COLUMN IF EXISTS returned_at")
 
 
 def downgrade() -> None:
-    op.add_column(
-        "key_borrow_records",
-        sa.Column("returned_at", sa.DateTime(timezone=True), nullable=True),
+    op.execute(
+        "ALTER TABLE key_borrow_records "
+        "ADD COLUMN IF NOT EXISTS returned_at TIMESTAMP WITH TIME ZONE"
     )
     op.alter_column("key_borrow_records", "key_id", existing_type=sa.Integer(), nullable=False)
-    op.drop_column("key_borrow_records", "borrowed_key_name")
+    op.execute("ALTER TABLE key_borrow_records DROP COLUMN IF EXISTS borrowed_key_name")
