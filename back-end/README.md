@@ -97,7 +97,7 @@ Authorization: Bearer <access_token>
 
 When the access token expires, call `/api/v1/auth/refresh` with the refresh token to get a new token pair.
 
-`/auth/login` accepts either the registered email or a verified SDU ID:
+`/auth/login` accepts a registered email, local account, or verified SDU ID:
 
 ```json
 {
@@ -106,7 +106,7 @@ When the access token expires, call `/api/v1/auth/refresh` with the refresh toke
 }
 ```
 
-SDU ID login becomes available only after the user completes SDU authentication and the ID is saved in `AuthProfile`.
+SDU ID login becomes available only after the user completes SDU authentication and the ID is saved in `AuthProfile`. The seed script creates the initial local admin account `202300450146`.
 
 ## SDU Authentication
 
@@ -446,7 +446,7 @@ For scheduled execution, run this command from the backend directory via cron:
 conda run -n fastapi python -m app.tasks.process_expirations
 ```
 
-Seed venues, key resources, and optional initial admin:
+Seed venues and the initial admin:
 
 ```sh
 conda run -n fastapi python -m app.db.seed

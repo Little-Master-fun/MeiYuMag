@@ -66,7 +66,7 @@ async def login(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AuthResponse:
     account = payload.account.strip()
-    user = await get_user_by_email(db, account) if "@" in account else None
+    user = await get_user_by_email(db, account)
     if user is None:
         user = await get_user_by_sduid(db, account)
     if user is None or not verify_password(payload.password, user.password_hash):

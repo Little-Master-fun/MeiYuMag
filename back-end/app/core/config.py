@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     smtp_from: str | None = None
     admin_notification_email_csv: str = ""
 
-    initial_admin_email: str | None = None
+    initial_admin_account: str | None = None
     initial_admin_password: str | None = None
 
     ai_api_base_url: str | None = None

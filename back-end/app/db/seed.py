@@ -5,14 +5,48 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.core.security import hash_password
 from app.db.session import AsyncSessionLocal
-from app.models.key import KeyResource
 from app.models.user import User
 from app.models.venue import Venue
 
 
 VENUE_SEEDS = [
     {
-        "name": "山东大学美育文化馆",
+        "name": "大学生研讨室1",
+        "venue_type": "meiyu_venue",
+        "description": "美育场地申请使用",
+    },
+    {
+        "name": "大学生研讨室2",
+        "venue_type": "meiyu_venue",
+        "description": "美育场地申请使用",
+    },
+    {
+        "name": "兴隆山艺术走廊",
+        "venue_type": "meiyu_venue",
+        "description": "美育场地申请使用",
+    },
+    {
+        "name": "会议室",
+        "venue_type": "meiyu_venue",
+        "description": "美育场地申请使用",
+    },
+    {
+        "name": "美育小舞台",
+        "venue_type": "meiyu_venue",
+        "description": "美育场地申请使用",
+    },
+    {
+        "name": "多功能厅（大）",
+        "venue_type": "meiyu_venue",
+        "description": "美育场地申请使用",
+    },
+    {
+        "name": "多功能厅（中）",
+        "venue_type": "meiyu_venue",
+        "description": "美育场地申请使用",
+    },
+    {
+        "name": "多功能厅（小）",
         "venue_type": "meiyu_venue",
         "description": "美育场地申请使用",
     },
@@ -23,10 +57,8 @@ VENUE_SEEDS = [
     },
 ]
 
-KEY_SEEDS = [
-    {"name": "美育文化馆钥匙", "room_name": "山东大学美育文化馆", "status": "available"},
-    {"name": "悦园三楼钥匙", "room_name": "悦园三楼", "status": "available"},
-]
+DEFAULT_INITIAL_ADMIN_ACCOUNT = "202300450146"
+DEFAULT_INITIAL_ADMIN_PASSWORD = "genius"
 
 
 async def upsert_venues() -> None:
@@ -40,17 +72,10 @@ async def upsert_venues() -> None:
                 venue.venue_type = item["venue_type"]
                 venue.description = item["description"]
 
-        for item in KEY_SEEDS:
-            result = await db.execute(select(KeyResource).where(KeyResource.name == item["name"]))
-            key = result.scalar_one_or_none()
-            if key is None:
-                db.add(KeyResource(**item))
-            else:
-                key.room_name = item["room_name"]
-                key.status = item["status"]
-
-        if settings.initial_admin_email and settings.initial_admin_password:
-            email = settings.initial_admin_email.lower()
+        initial_admin_account = settings.initial_admin_account or DEFAULT_INITIAL_ADMIN_ACCOUNT
+        initial_admin_password = settings.initial_admin_password or DEFAULT_INITIAL_ADMIN_PASSWORD
+        if initial_admin_account and initial_admin_password:
+            email = initial_admin_account.lower()
             result = await db.execute(select(User).where(User.email == email))
             user = result.scalar_one_or_none()
             if user is None:

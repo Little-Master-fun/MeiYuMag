@@ -23,7 +23,7 @@ class TokenPair(BaseModel):
 
 class UserRead(BaseModel):
     id: int
-    email: EmailStr
+    email: str
     role: str
     department: str | None
     is_sdu_verified: bool

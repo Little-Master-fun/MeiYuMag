@@ -13,7 +13,7 @@ class NotificationService:
     async def get_admin_recipients(self, db: AsyncSession) -> list[str]:
         recipients = list(settings.admin_notification_emails)
         result = await db.execute(select(User.email).where(User.role == "admin"))
-        recipients.extend(result.scalars().all())
+        recipients.extend(email for email in result.scalars().all() if "@" in email)
         return self.dedupe_recipients(recipients)
 
     def dedupe_recipients(self, recipients: list[str]) -> list[str]:
