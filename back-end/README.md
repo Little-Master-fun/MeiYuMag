@@ -352,21 +352,10 @@ Authorization: Bearer <access_token>
 Form fields:
 
 ```text
-key_id=1
-borrowed_at=2026-06-12T12:00:00+08:00
-expected_return_at=2026-06-12T19:10:00+08:00
-file=<key borrowing application file>
+file=<PDF scanned key borrowing application>
 ```
 
-The endpoint creates an application with `application_type=key_borrow`, stores the uploaded file, and creates a `KeyBorrowRecord`.
-
-Admin key borrowing operations:
-
-```text
-PATCH /api/v1/keys/{key_id}
-POST /api/v1/keys/borrow-records/{application_id}/checkout
-POST /api/v1/keys/borrow-records/{application_id}/return
-```
+The endpoint extracts readable PDF text, sends it to AI, stores the borrowed key name and borrowing time in `KeyBorrowRecord`, stores the uploaded PDF, and creates an application with `application_type=key_borrow` and `status=pending_admin_submit`.
 
 ## Admin APIs
 

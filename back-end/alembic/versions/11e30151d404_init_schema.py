@@ -126,11 +126,11 @@ def upgrade() -> None:
     op.create_table(
         "key_borrow_records",
         sa.Column("id", sa.Integer(), primary_key=True),
-        sa.Column("key_id", sa.Integer(), sa.ForeignKey("key_resources.id"), nullable=False),
+        sa.Column("key_id", sa.Integer(), sa.ForeignKey("key_resources.id"), nullable=True),
         sa.Column("application_id", sa.Integer(), sa.ForeignKey("applications.id"), nullable=False),
+        sa.Column("borrowed_key_name", sa.String(length=255), nullable=True),
         sa.Column("borrowed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("expected_return_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("returned_at", sa.DateTime(timezone=True), nullable=True),
     )
     op.create_index("ix_key_borrow_records_key_id", "key_borrow_records", ["key_id"])
     op.create_index("ix_key_borrow_records_application_id", "key_borrow_records", ["application_id"])

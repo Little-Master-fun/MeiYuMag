@@ -451,7 +451,7 @@ stateDiagram-v2
 | MaterialRequirement | 不同申请类型的材料要求，如必传文件、可补交文件、是否需要盖章签字 |
 | AiReview | AI 初审记录，包含检查结果、冲突信息、修改建议 |
 | ReservationCalendar | 场地时间表，用于记录预占用和正式占用时间段 |
-| KeyBorrowRecord | 钥匙借用记录，用于记录借用人、钥匙、借出时间、预计归还时间、实际归还时间 |
+| KeyBorrowRecord | 钥匙借用记录，用于保存 AI 提取出的借用钥匙、借用开始时间和预计归还时间 |
 | AdminActionLog | 管理员操作记录，用于追踪状态修改和权限调整 |
 | ApplicationStatusLog | 申请状态变更记录，用于追踪每次状态流转、操作人和原因 |
 | NotificationLog | 通知记录，用于追踪邮件类型、收件人、发送状态、失败原因 |
