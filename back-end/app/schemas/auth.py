@@ -4,6 +4,14 @@ from pydantic import BaseModel, EmailStr, Field
 class RegisterRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
+    organization: str = Field(min_length=1, max_length=255)
+    mobile: str = Field(min_length=11, max_length=11, pattern=r"^\d+$")
+    sms_code: str = Field(min_length=6, max_length=6, pattern=r"^\d+$")
+
+
+class RegistrationSmsRequest(BaseModel):
+    mobile: str = Field(min_length=11, max_length=11, pattern=r"^\d+$")
+    image_code: str = Field(min_length=4, max_length=4, pattern=r"^\d+$")
 
 
 class LoginRequest(BaseModel):

@@ -30,6 +30,7 @@ logs/
 
 # Editors / OS
 .DS_Store
+*.blend1
 .idea/
 .vscode/*
 !.vscode/extensions.json
