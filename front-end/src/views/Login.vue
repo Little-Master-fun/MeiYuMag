@@ -5,7 +5,18 @@ import { gsap } from 'gsap'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import GUI from 'three/addons/libs/lil-gui.module.min.js'
-import { ArrowRight, Eye, EyeOff, LockKeyhole, Trees, UserRound } from 'lucide-vue-next'
+import {
+  ArrowRight,
+  Building2,
+  Eye,
+  EyeOff,
+  LockKeyhole,
+  Mail,
+  RefreshCw,
+  Smartphone,
+  Trees,
+  UserRound,
+} from 'lucide-vue-next'
 import { useAuthStore } from '@/stores/auth'
 import {
   createParchmentPageCanvas,
@@ -19,6 +30,7 @@ import { projectPageContentOntoMaterial } from '@/assets/shaders/pageContent'
 import { enableTreeCrownWind, type WindShaderUniforms } from '@/assets/shaders/treeWind'
 
 const viewport = ref<HTMLDivElement | null>(null)
+const authFormStage = ref<HTMLDivElement | null>(null)
 const loadingProgress = ref(0)
 const loadError = ref('')
 const modelReady = ref(false)
@@ -27,7 +39,22 @@ const loginPanelVisible = ref(false)
 const account = ref('')
 const password = ref('')
 const passwordVisible = ref(false)
+const authMode = ref<'login' | 'register'>('login')
+const registerEmail = ref('')
+const registerOrganization = ref('')
+const registerMobile = ref('')
+const registerImageCode = ref('')
+const registerSmsCode = ref('')
+const registerPassword = ref('')
+const registerPasswordConfirm = ref('')
+const registerPasswordVisible = ref(false)
+const registrationCaptchaUrl = ref('')
+const captchaLoading = ref(false)
+const smsSending = ref(false)
+const smsSent = ref(false)
+const smsCountdown = ref(0)
 const formError = ref('')
+const formNotice = ref('')
 const loginSucceeded = ref(false)
 const pageTurnAvailable = ref(false)
 const pageTurning = ref(false)
@@ -45,6 +72,7 @@ let houseModel: THREE.Object3D | null = null
 let clipboardModel: THREE.Object3D | null = null
 let resizeObserver: ResizeObserver | null = null
 let animationFrame = 0
+let smsCountdownTimer: ReturnType<typeof setInterval> | null = null
 let topPage: THREE.Mesh | null = null
 let pageTurnShader: PageTurnShaderUniforms | null = null
 let pageContentCanvas: ParchmentPageCanvas | null = null
@@ -89,8 +117,23 @@ interface PostLoginFlight {
   startedAt: number
 }
 
+interface PushedTreeAnimation {
+  pivot: THREE.Group
+  baseQuaternion: THREE.Quaternion
+  swayAxis: THREE.Vector3
+  swayQuaternion: THREE.Quaternion
+  raccoonPivot: THREE.Group
+  raccoonBasePosition: THREE.Vector3
+  raccoonBaseQuaternion: THREE.Quaternion
+  raccoonLeanAxis: THREE.Vector3
+  raccoonPushOffset: THREE.Vector3
+  raccoonBobOffset: THREE.Vector3
+  raccoonLeanQuaternion: THREE.Quaternion
+}
+
 let cameraFlight: CameraFlight | null = null
 let postLoginFlight: PostLoginFlight | null = null
+let pushedTreeAnimation: PushedTreeAnimation | null = null
 let startCameraTarget: THREE.Vector3 | null = null
 let endCameraTarget: THREE.Vector3 | null = null
 let finalCameraPosition: THREE.Vector3 | null = null
@@ -162,6 +205,16 @@ const houseDebug = {
 
 const postLoginMotionDebug = {
   overlapDuration: 1.2,
+}
+
+const pushedTreeDebug = {
+  enabled: true,
+  treeAmplitude: 0.4,
+  directionalLean: 0.5,
+  speed: 0.48,
+  raccoonAmplitude: 0.4,
+  raccoonLean: 1.1,
+  raccoonTravel: 0.35,
 }
 
 const windShaders: WindShaderUniforms[] = []
@@ -271,6 +324,141 @@ function fixCutoutMaterial(material: THREE.Material) {
   material.side = THREE.DoubleSide
   material.alphaToCoverage = true
   material.needsUpdate = true
+}
+
+function setupRaccoonPushedTree(root: THREE.Object3D) {
+  const tree = root.getObjectByName('BTree002')
+  const bird = root.getObjectByName('Bird')
+  const raccoon = root.getObjectByName('Racoon')
+  const parent = tree?.parent
+  const raccoonParent = raccoon?.parent
+  if (!tree || !bird || !raccoon || !parent || !raccoonParent) {
+    console.warn('[浣熊推树动画] 未找到 BTree002、Bird 或 Racoon 节点')
+    return
+  }
+
+  root.updateWorldMatrix(true, true)
+  const treeBounds = new THREE.Box3().setFromObject(tree)
+  const raccoonBounds = new THREE.Box3().setFromObject(raccoon)
+  const treeBaseWorld = treeBounds.getCenter(new THREE.Vector3())
+  treeBaseWorld.y = treeBounds.min.y
+  const raccoonCenterWorld = raccoonBounds.getCenter(new THREE.Vector3())
+  const raccoonBaseWorld = raccoonCenterWorld.clone()
+  raccoonBaseWorld.y = raccoonBounds.min.y
+  const raccoonHeightWorld = raccoonBounds.getSize(new THREE.Vector3()).y
+
+  // The horizontal direction from the raccoon toward the trunk is the push
+  // direction. Tilting around up × direction makes the crown move away from it.
+  const pushDirectionWorld = treeBaseWorld.clone().sub(raccoonCenterWorld)
+  pushDirectionWorld.y = 0
+  if (pushDirectionWorld.lengthSq() < 1e-8) pushDirectionWorld.set(0, 0, -1)
+  pushDirectionWorld.normalize()
+  const swayAxisWorld = new THREE.Vector3(0, 1, 0)
+    .cross(pushDirectionWorld)
+    .normalize()
+  const parentWorldQuaternion = parent.getWorldQuaternion(new THREE.Quaternion())
+  const swayAxisLocal = swayAxisWorld
+    .clone()
+    .applyQuaternion(parentWorldQuaternion.invert())
+    .normalize()
+
+  const pivot = new THREE.Group()
+  pivot.name = 'Raccoon_Pushed_Tree_Pivot'
+  parent.add(pivot)
+  pivot.position.copy(parent.worldToLocal(treeBaseWorld.clone()))
+  pivot.updateWorldMatrix(true, false)
+  pivot.attach(tree)
+  pivot.attach(bird)
+
+  // Rotate the raccoon around its feet so the push reads as body weight rather
+  // than the whole character floating. Offsets are converted from world space,
+  // which keeps the motion stable even though the imported GLB is heavily scaled.
+  const raccoonParentWorldQuaternion = raccoonParent.getWorldQuaternion(
+    new THREE.Quaternion(),
+  )
+  const raccoonLeanAxisLocal = swayAxisWorld
+    .clone()
+    .applyQuaternion(raccoonParentWorldQuaternion.invert())
+    .normalize()
+  const raccoonPivot = new THREE.Group()
+  raccoonPivot.name = 'Raccoon_Push_Pivot'
+  raccoonParent.add(raccoonPivot)
+  raccoonPivot.position.copy(raccoonParent.worldToLocal(raccoonBaseWorld.clone()))
+  const raccoonBasePosition = raccoonPivot.position.clone()
+  const raccoonPushPosition = raccoonParent.worldToLocal(
+    raccoonBaseWorld
+      .clone()
+      .addScaledVector(pushDirectionWorld, raccoonHeightWorld * 0.12),
+  )
+  const raccoonBobPosition = raccoonParent.worldToLocal(
+    raccoonBaseWorld.clone().add(new THREE.Vector3(0, -raccoonHeightWorld * 0.035, 0)),
+  )
+  raccoonPivot.updateWorldMatrix(true, false)
+  raccoonPivot.attach(raccoon)
+
+  pushedTreeAnimation = {
+    pivot,
+    baseQuaternion: pivot.quaternion.clone(),
+    swayAxis: swayAxisLocal,
+    swayQuaternion: new THREE.Quaternion(),
+    raccoonPivot,
+    raccoonBasePosition,
+    raccoonBaseQuaternion: raccoonPivot.quaternion.clone(),
+    raccoonLeanAxis: raccoonLeanAxisLocal,
+    raccoonPushOffset: raccoonPushPosition.sub(raccoonBasePosition),
+    raccoonBobOffset: raccoonBobPosition.sub(raccoonBasePosition),
+    raccoonLeanQuaternion: new THREE.Quaternion(),
+  }
+}
+
+function updateRaccoonPushedTree(elapsed: number) {
+  if (!pushedTreeAnimation) return
+  if (!pushedTreeDebug.enabled) {
+    pushedTreeAnimation.pivot.quaternion.copy(pushedTreeAnimation.baseQuaternion)
+    pushedTreeAnimation.raccoonPivot.position.copy(
+      pushedTreeAnimation.raccoonBasePosition,
+    )
+    pushedTreeAnimation.raccoonPivot.quaternion.copy(
+      pushedTreeAnimation.raccoonBaseQuaternion,
+    )
+    return
+  }
+
+  const phase = elapsed * Math.PI * 2 * pushedTreeDebug.speed
+  const rawPush = (Math.sin(phase) + 1) * 0.5
+  const pushAmount = rawPush * rawPush * (3 - 2 * rawPush)
+  const treePhase = phase - 0.32
+  const primaryWave = Math.sin(treePhase) * pushedTreeDebug.treeAmplitude
+  const secondaryWave =
+    Math.sin(treePhase * 2 + 0.65) * pushedTreeDebug.treeAmplitude * 0.12
+  const angle = THREE.MathUtils.degToRad(
+    pushedTreeDebug.directionalLean + primaryWave + secondaryWave,
+  )
+  pushedTreeAnimation.swayQuaternion.setFromAxisAngle(pushedTreeAnimation.swayAxis, angle)
+  pushedTreeAnimation.pivot.quaternion
+    .copy(pushedTreeAnimation.baseQuaternion)
+    .multiply(pushedTreeAnimation.swayQuaternion)
+
+  const raccoonMotionAmount = pushAmount * pushedTreeDebug.raccoonAmplitude
+  const secondaryBob =
+    Math.max(0, Math.sin(phase * 2)) * 0.08 * pushedTreeDebug.raccoonAmplitude
+  pushedTreeAnimation.raccoonPivot.position
+    .copy(pushedTreeAnimation.raccoonBasePosition)
+    .addScaledVector(
+      pushedTreeAnimation.raccoonPushOffset,
+      raccoonMotionAmount * pushedTreeDebug.raccoonTravel,
+    )
+    .addScaledVector(
+      pushedTreeAnimation.raccoonBobOffset,
+      raccoonMotionAmount + secondaryBob,
+    )
+  pushedTreeAnimation.raccoonLeanQuaternion.setFromAxisAngle(
+    pushedTreeAnimation.raccoonLeanAxis,
+    THREE.MathUtils.degToRad(raccoonMotionAmount * pushedTreeDebug.raccoonLean),
+  )
+  pushedTreeAnimation.raccoonPivot.quaternion
+    .copy(pushedTreeAnimation.raccoonBaseQuaternion)
+    .multiply(pushedTreeAnimation.raccoonLeanQuaternion)
 }
 
 function startCameraEntrance(object: THREE.Object3D, framingObject: THREE.Object3D = object) {
@@ -500,6 +688,27 @@ function createCameraDebugGui(distance: number, target: THREE.Vector3) {
     .add(postLoginMotionDebug, 'overlapDuration', 0, 1.2, 0.05)
     .name('重叠时间 秒')
 
+  const pushedTreeFolder = debugGui.addFolder('浣熊推树动画')
+  pushedTreeFolder.add(pushedTreeDebug, 'enabled').name('启用')
+  pushedTreeFolder
+    .add(pushedTreeDebug, 'treeAmplitude', 0, 5, 0.1)
+    .name('树与鸟幅度 °')
+  pushedTreeFolder
+    .add(pushedTreeDebug, 'directionalLean', -3, 4, 0.1)
+    .name('受力倾斜 °')
+  pushedTreeFolder
+    .add(pushedTreeDebug, 'speed', 0.1, 1.5, 0.01)
+    .name('整体速度')
+  pushedTreeFolder
+    .add(pushedTreeDebug, 'raccoonAmplitude', 0, 1.5, 0.05)
+    .name('浣熊动作幅度')
+  pushedTreeFolder
+    .add(pushedTreeDebug, 'raccoonLean', 0, 15, 0.1)
+    .name('浣熊前倾 °')
+  pushedTreeFolder
+    .add(pushedTreeDebug, 'raccoonTravel', 0, 2, 0.05)
+    .name('浣熊推进量')
+
   debugGui.add(cameraDebug, 'replay').name('重新播放运镜')
   positionFolder.close()
   endPositionFolder.close()
@@ -507,6 +716,7 @@ function createCameraDebugGui(distance: number, target: THREE.Vector3) {
   clipboardFolder.open()
   houseFolder.open()
   postLoginMotionFolder.open()
+  pushedTreeFolder.close()
 }
 
 function addReadOnlyController(folder: GUI, property: keyof typeof cameraReadout, label: string) {
@@ -871,6 +1081,7 @@ function animate() {
 
   const elapsed = performance.now() * 0.001
   for (const shader of windShaders) shader.time.value = elapsed
+  updateRaccoonPushedTree(elapsed)
   if (pageTurnShader) pageTurnShader.time.value = elapsed
   pageContentCanvas?.tick()
 
@@ -898,6 +1109,159 @@ async function handleLogin() {
   }
 
   formError.value = auth.error || '登录失败，请检查账号和密码'
+}
+
+function stopSmsCountdown() {
+  if (smsCountdownTimer) clearInterval(smsCountdownTimer)
+  smsCountdownTimer = null
+  smsCountdown.value = 0
+}
+
+function startSmsCountdown() {
+  stopSmsCountdown()
+  smsCountdown.value = 60
+  smsCountdownTimer = setInterval(() => {
+    smsCountdown.value -= 1
+    if (smsCountdown.value <= 0) stopSmsCountdown()
+  }, 1000)
+}
+
+function revokeRegistrationCaptcha() {
+  if (!registrationCaptchaUrl.value) return
+  URL.revokeObjectURL(registrationCaptchaUrl.value)
+  registrationCaptchaUrl.value = ''
+}
+
+async function loadRegistrationCaptcha() {
+  captchaLoading.value = true
+  formError.value = ''
+  formNotice.value = ''
+  smsSent.value = false
+  stopSmsCountdown()
+
+  const captcha = await auth.requestRegistrationCaptcha()
+  revokeRegistrationCaptcha()
+  if (captcha) registrationCaptchaUrl.value = URL.createObjectURL(captcha)
+  else formError.value = auth.error || '图片验证码加载失败，请稍后重试'
+  captchaLoading.value = false
+}
+
+function changeAuthMode(mode: 'login' | 'register') {
+  if (authMode.value === mode) return
+  authMode.value = mode
+  formError.value = ''
+  formNotice.value = ''
+  loginSucceeded.value = false
+  if (mode === 'register' && !registrationCaptchaUrl.value) {
+    void loadRegistrationCaptcha()
+  }
+}
+
+function handleAuthFormBeforeLeave(element: Element) {
+  if (!authFormStage.value) return
+  authFormStage.value.style.height = `${(element as HTMLElement).offsetHeight}px`
+}
+
+function handleAuthFormBeforeEnter(element: Element) {
+  const stage = authFormStage.value
+  if (!stage) return
+  const nextForm = element as HTMLElement
+  void stage.offsetHeight
+  requestAnimationFrame(() => {
+    const nextHeight = nextForm.scrollHeight
+    stage.style.height = `${nextHeight}px`
+  })
+}
+
+function handleAuthFormAfterEnter() {
+  if (authFormStage.value) authFormStage.value.style.height = 'auto'
+}
+
+function invalidateSmsVerification() {
+  if (!smsSent.value) return
+  smsSent.value = false
+  formNotice.value = '手机号或图片验证码已修改，请重新获取短信验证码。'
+  stopSmsCountdown()
+}
+
+async function handleSendRegistrationSms() {
+  if (!/^\d{11}$/.test(registerMobile.value)) {
+    formError.value = '请输入11位手机号'
+    return
+  }
+  if (!/^\d{4}$/.test(registerImageCode.value)) {
+    formError.value = '请输入图片中的4位验证码'
+    return
+  }
+
+  smsSending.value = true
+  formError.value = ''
+  formNotice.value = ''
+  const success = await auth.sendRegistrationSms(
+    registerMobile.value,
+    registerImageCode.value,
+  )
+  smsSending.value = false
+
+  if (success) {
+    smsSent.value = true
+    formNotice.value = '短信验证码已发送，请在两分钟内完成注册。'
+    startSmsCountdown()
+    return
+  }
+
+  const errorMessage = auth.error || '短信验证码发送失败'
+  await loadRegistrationCaptcha()
+  formError.value = errorMessage
+}
+
+async function handleRegister() {
+  const email = registerEmail.value.trim()
+  const organization = registerOrganization.value.trim()
+  if (!email || !organization) {
+    formError.value = '请填写邮箱和所属组织'
+    return
+  }
+  if (!/^\d{11}$/.test(registerMobile.value)) {
+    formError.value = '请输入11位手机号'
+    return
+  }
+  if (!smsSent.value || !/^\d{6}$/.test(registerSmsCode.value)) {
+    formError.value = '请先完成手机验证并输入6位短信验证码'
+    return
+  }
+  if (registerPassword.value.length < 8) {
+    formError.value = '密码至少需要8个字符'
+    return
+  }
+  if (registerPassword.value !== registerPasswordConfirm.value) {
+    formError.value = '两次输入的密码不一致'
+    return
+  }
+
+  formError.value = ''
+  formNotice.value = ''
+  loginSucceeded.value = false
+  const success = await auth.register(
+    email,
+    registerPassword.value,
+    organization,
+    registerMobile.value,
+    registerSmsCode.value,
+  )
+
+  if (success) {
+    loginSucceeded.value = true
+    stopSmsCountdown()
+    playPostLoginCamera()
+    return
+  }
+
+  const errorMessage = auth.error || '注册失败，请检查认证信息'
+  registerSmsCode.value = ''
+  smsSent.value = false
+  await loadRegistrationCaptcha()
+  formError.value = errorMessage
 }
 
 function disposeMaterial(material: THREE.Material) {
@@ -997,6 +1361,7 @@ onMounted(() => {
             leafyTreeParts.push(child)
         }
       })
+      setupRaccoonPushedTree(houseModel)
 
       clipboardModel.traverse((child) => {
         if (!(child instanceof THREE.Mesh)) return
@@ -1068,6 +1433,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   cancelAnimationFrame(animationFrame)
+  stopSmsCountdown()
+  revokeRegistrationCaptcha()
   pageTurnTimeline?.kill()
   resizeObserver?.disconnect()
   controls?.dispose()
@@ -1102,6 +1469,7 @@ onBeforeUnmount(() => {
   pageTurnCompleted.value = false
   cameraFlight = null
   postLoginFlight = null
+  pushedTreeAnimation = null
   startCameraTarget = null
   endCameraTarget = null
   finalCameraPosition = null
@@ -1124,7 +1492,12 @@ onBeforeUnmount(() => {
     <div v-if="loadError" class="error-panel">{{ loadError }}</div>
 
     <Transition name="login-card">
-      <section v-if="loginPanelVisible" class="login-card" aria-labelledby="login-title">
+      <section
+        v-if="loginPanelVisible"
+        class="login-card"
+        :class="{ 'register-card': authMode === 'register' }"
+        aria-labelledby="auth-title"
+      >
         <div class="card-ornament" aria-hidden="true">
           <span />
           <Trees :size="18" :stroke-width="1.6" />
@@ -1133,11 +1506,51 @@ onBeforeUnmount(() => {
 
         <header class="card-heading">
           <p>MEIYU SYSTEM</p>
-          <h1 id="login-title">欢迎回来</h1>
-          <span>登录美育活动管理系统</span>
+          <Transition name="auth-heading" mode="out-in">
+            <div :key="authMode" class="card-heading-copy">
+              <h1 id="auth-title">{{ authMode === 'login' ? '欢迎回来' : '加入我们' }}</h1>
+              <span>
+                {{ authMode === 'login' ? '登录美育活动管理系统' : '完成手机认证后创建账户' }}
+              </span>
+            </div>
+          </Transition>
         </header>
 
-        <form class="login-form" @submit.prevent="handleLogin">
+        <div class="auth-mode-switch" role="tablist" aria-label="账户操作">
+          <button
+            type="button"
+            role="tab"
+            :aria-selected="authMode === 'login'"
+            :class="{ active: authMode === 'login' }"
+            @click="changeAuthMode('login')"
+          >
+            登录
+          </button>
+          <button
+            type="button"
+            role="tab"
+            :aria-selected="authMode === 'register'"
+            :class="{ active: authMode === 'register' }"
+            @click="changeAuthMode('register')"
+          >
+            注册
+          </button>
+        </div>
+
+        <div ref="authFormStage" class="auth-form-stage">
+          <Transition
+            name="auth-form"
+            mode="out-in"
+            @before-leave="handleAuthFormBeforeLeave"
+            @before-enter="handleAuthFormBeforeEnter"
+            @after-enter="handleAuthFormAfterEnter"
+          >
+        <form
+          v-if="authMode === 'login'"
+          key="login"
+          class="login-form"
+          @submit.prevent="handleLogin"
+        >
           <label class="form-field">
             <span>账号</span>
             <span class="input-shell">
@@ -1191,7 +1604,196 @@ onBeforeUnmount(() => {
           </button>
         </form>
 
-        <p class="privacy-note">使用已认证的邮箱或手机号登录</p>
+        <form
+          v-else
+          key="register"
+          class="login-form register-form"
+          @submit.prevent="handleRegister"
+        >
+          <div class="register-grid">
+            <label class="form-field full-field">
+              <span>邮箱</span>
+              <span class="input-shell">
+                <Mail :size="17" :stroke-width="1.7" aria-hidden="true" />
+                <input
+                  v-model="registerEmail"
+                  name="register-email"
+                  type="email"
+                  autocomplete="email"
+                  placeholder="用作登录账号"
+                  :disabled="auth.loading || loginSucceeded"
+                  required
+                />
+              </span>
+            </label>
+
+            <label class="form-field full-field">
+              <span>所属组织</span>
+              <span class="input-shell">
+                <Building2 :size="17" :stroke-width="1.7" aria-hidden="true" />
+                <input
+                  v-model="registerOrganization"
+                  name="organization"
+                  type="text"
+                  autocomplete="organization"
+                  placeholder="学院、社团或部门名称"
+                  :disabled="auth.loading || loginSucceeded"
+                  required
+                />
+              </span>
+            </label>
+
+            <label class="form-field full-field">
+              <span>认证手机号</span>
+              <span class="input-shell">
+                <Smartphone :size="17" :stroke-width="1.7" aria-hidden="true" />
+                <input
+                  v-model="registerMobile"
+                  name="mobile"
+                  type="tel"
+                  inputmode="numeric"
+                  autocomplete="tel"
+                  maxlength="11"
+                  placeholder="山大统一身份认证手机号"
+                  :disabled="auth.loading || loginSucceeded"
+                  required
+                  @input="invalidateSmsVerification"
+                />
+              </span>
+            </label>
+
+            <label class="form-field full-field">
+              <span>图片验证码</span>
+              <span class="verification-control captcha-control">
+                <span class="input-shell">
+                  <input
+                    v-model="registerImageCode"
+                    name="image-code"
+                    type="text"
+                    inputmode="numeric"
+                    autocomplete="off"
+                    maxlength="4"
+                    placeholder="4位验证码"
+                    :disabled="auth.loading || loginSucceeded"
+                    required
+                    @input="invalidateSmsVerification"
+                  />
+                </span>
+                <button
+                  class="captcha-button"
+                  type="button"
+                  :disabled="captchaLoading || smsSending || auth.loading"
+                  title="点击更换图片验证码"
+                  @click="loadRegistrationCaptcha"
+                >
+                  <img
+                    v-if="registrationCaptchaUrl && !captchaLoading"
+                    :src="registrationCaptchaUrl"
+                    alt="图片验证码，点击可更换"
+                  />
+                  <span v-else>{{ captchaLoading ? '加载中' : '重新获取' }}</span>
+                  <RefreshCw :size="14" :class="{ spinning: captchaLoading }" aria-hidden="true" />
+                </button>
+              </span>
+            </label>
+
+            <label class="form-field full-field">
+              <span>短信验证码</span>
+              <span class="verification-control">
+                <span class="input-shell">
+                  <input
+                    v-model="registerSmsCode"
+                    name="sms-code"
+                    type="text"
+                    inputmode="numeric"
+                    autocomplete="one-time-code"
+                    maxlength="6"
+                    placeholder="6位短信验证码"
+                    :disabled="auth.loading || loginSucceeded"
+                    required
+                  />
+                </span>
+                <button
+                  class="send-code-button"
+                  type="button"
+                  :disabled="smsSending || smsCountdown > 0 || auth.loading || loginSucceeded"
+                  @click="handleSendRegistrationSms"
+                >
+                  {{ smsSending ? '发送中…' : smsCountdown > 0 ? `${smsCountdown}s 后重发` : '获取验证码' }}
+                </button>
+              </span>
+            </label>
+
+            <label class="form-field">
+              <span>设置密码</span>
+              <span class="input-shell">
+                <LockKeyhole :size="17" :stroke-width="1.7" aria-hidden="true" />
+                <input
+                  v-model="registerPassword"
+                  name="register-password"
+                  :type="registerPasswordVisible ? 'text' : 'password'"
+                  autocomplete="new-password"
+                  minlength="8"
+                  placeholder="至少8个字符"
+                  :disabled="auth.loading || loginSucceeded"
+                  required
+                />
+                <button
+                  type="button"
+                  class="password-toggle"
+                  :aria-label="registerPasswordVisible ? '隐藏密码' : '显示密码'"
+                  @click="registerPasswordVisible = !registerPasswordVisible"
+                >
+                  <EyeOff v-if="registerPasswordVisible" :size="16" aria-hidden="true" />
+                  <Eye v-else :size="16" aria-hidden="true" />
+                </button>
+              </span>
+            </label>
+
+            <label class="form-field">
+              <span>确认密码</span>
+              <span class="input-shell">
+                <LockKeyhole :size="17" :stroke-width="1.7" aria-hidden="true" />
+                <input
+                  v-model="registerPasswordConfirm"
+                  name="register-password-confirm"
+                  :type="registerPasswordVisible ? 'text' : 'password'"
+                  autocomplete="new-password"
+                  minlength="8"
+                  placeholder="再次输入密码"
+                  :disabled="auth.loading || loginSucceeded"
+                  required
+                />
+              </span>
+            </label>
+          </div>
+
+          <p v-if="formError" class="form-message error-message" role="alert">
+            {{ formError }}
+          </p>
+          <p v-else-if="formNotice" class="form-message info-message" role="status">
+            {{ formNotice }}
+          </p>
+          <p v-if="loginSucceeded" class="form-message success-message" role="status">
+            手机认证和账户注册成功。
+          </p>
+
+          <button class="login-button" type="submit" :disabled="auth.loading || loginSucceeded">
+            <span>{{ auth.loading ? '正在认证并创建…' : loginSucceeded ? '注册成功' : '认证并创建账户' }}</span>
+            <ArrowRight v-if="!auth.loading" :size="18" :stroke-width="1.8" aria-hidden="true" />
+            <span v-else class="button-spinner" aria-hidden="true" />
+          </button>
+        </form>
+          </Transition>
+        </div>
+
+        <p class="privacy-note">
+          {{
+            authMode === 'login'
+              ? '支持已认证的邮箱、手机号或学号登录'
+              : '认证成功前不会创建用户名、密码和组织记录'
+          }}
+        </p>
       </section>
     </Transition>
 
@@ -1290,6 +1892,27 @@ onBeforeUnmount(() => {
   color: #29453c;
   backdrop-filter: blur(18px) saturate(0.9);
   transform: translateY(-50%);
+  transition:
+    width 520ms cubic-bezier(0.22, 1, 0.36, 1),
+    padding 520ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-radius 420ms ease,
+    box-shadow 420ms ease;
+}
+
+.login-card.register-card {
+  width: min(470px, calc(100vw - 48px));
+  max-height: calc(100vh - 32px);
+  padding: 24px 28px 20px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.login-card.register-card::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 .login-card::before,
@@ -1353,6 +1976,11 @@ onBeforeUnmount(() => {
   margin: 0;
 }
 
+.card-heading-copy {
+  display: grid;
+  justify-items: center;
+}
+
 .card-heading p {
   color: #9b5d49;
   font-size: 10px;
@@ -1377,11 +2005,193 @@ onBeforeUnmount(() => {
   letter-spacing: 0.08em;
 }
 
+.register-card .card-heading {
+  margin: 13px 0 16px;
+}
+
+.register-card .card-heading h1 {
+  font-size: 27px;
+}
+
+.auth-mode-switch {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 4px;
+  margin-bottom: 19px;
+  padding: 4px;
+  border: 1px solid rgba(86, 112, 92, 0.16);
+  border-radius: 3px 13px 3px 13px;
+  background: rgba(219, 210, 188, 0.3);
+}
+
+.auth-mode-switch button {
+  min-height: 34px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 2px 10px 2px 10px;
+  background: transparent;
+  color: rgba(41, 69, 60, 0.55);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+  transition:
+    color 160ms ease,
+    background-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.auth-mode-switch button.active {
+  background: rgba(255, 253, 246, 0.86);
+  box-shadow: 0 3px 12px rgba(63, 75, 57, 0.08);
+  color: #355849;
+}
+
+.auth-form-stage {
+  position: relative;
+  overflow: hidden;
+  transition: height 520ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.auth-form-enter-active {
+  transition:
+    opacity 360ms ease,
+    transform 440ms cubic-bezier(0.22, 1, 0.36, 1),
+    filter 360ms ease;
+}
+
+.auth-form-leave-active {
+  transition:
+    opacity 210ms ease,
+    transform 260ms ease,
+    filter 210ms ease;
+}
+
+.auth-form-enter-from {
+  opacity: 0;
+  filter: blur(5px);
+  transform: translateX(18px) scale(0.985);
+}
+
+.auth-form-leave-to {
+  opacity: 0;
+  filter: blur(4px);
+  transform: translateX(-14px) scale(0.99);
+}
+
+.auth-heading-enter-active,
+.auth-heading-leave-active {
+  transition:
+    opacity 220ms ease,
+    transform 280ms cubic-bezier(0.22, 1, 0.36, 1),
+    filter 220ms ease;
+}
+
+.auth-heading-enter-from {
+  opacity: 0;
+  filter: blur(3px);
+  transform: translateY(7px);
+}
+
+.auth-heading-leave-to {
+  opacity: 0;
+  filter: blur(3px);
+  transform: translateY(-5px);
+}
+
 .login-form {
   position: relative;
   z-index: 1;
   display: grid;
   gap: 17px;
+}
+
+.register-form {
+  gap: 12px;
+}
+
+.register-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.register-grid .full-field {
+  grid-column: 1 / -1;
+}
+
+.register-form .form-field {
+  gap: 6px;
+}
+
+.register-form .input-shell {
+  min-height: 43px;
+  padding-inline: 12px;
+}
+
+.register-form .input-shell input {
+  font-size: 13px;
+}
+
+.verification-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 126px;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.captcha-control {
+  grid-template-columns: minmax(0, 1fr) 142px;
+}
+
+.captcha-button,
+.send-code-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 43px;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid rgba(86, 112, 92, 0.25);
+  border-radius: 3px 12px 3px 12px;
+  background: rgba(247, 241, 225, 0.82);
+  color: #466755;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    border-color 160ms ease,
+    background-color 160ms ease;
+}
+
+.captcha-button:hover:not(:disabled),
+.send-code-button:hover:not(:disabled) {
+  border-color: rgba(75, 111, 88, 0.55);
+  background: rgba(255, 253, 246, 0.96);
+}
+
+.captcha-button:disabled,
+.send-code-button:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+
+.captcha-button img {
+  width: 92px;
+  height: 32px;
+  object-fit: fill;
+  image-rendering: auto;
+}
+
+.captcha-button:has(img) {
+  justify-content: space-between;
+  padding-inline: 7px;
+}
+
+.spinning {
+  animation: button-spin 700ms linear infinite;
 }
 
 .form-field {
@@ -1474,6 +2284,11 @@ onBeforeUnmount(() => {
 .success-message {
   background: rgba(72, 125, 87, 0.1);
   color: #3f7650;
+}
+
+.info-message {
+  background: rgba(71, 102, 91, 0.08);
+  color: #4a695c;
 }
 
 .login-button {
@@ -1655,6 +2470,31 @@ onBeforeUnmount(() => {
   }
 }
 
+@media (max-width: 520px) {
+  .login-card.register-card {
+    width: calc(100vw - 24px);
+    max-height: calc(100vh - 20px);
+    padding: 18px 18px 16px;
+  }
+
+  .register-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .register-grid .form-field {
+    grid-column: 1;
+  }
+
+  .verification-control,
+  .captcha-control {
+    grid-template-columns: minmax(0, 1fr) 118px;
+  }
+
+  .captcha-button img {
+    width: 75px;
+  }
+}
+
 @media (max-height: 690px) and (max-width: 859px) {
   .login-card {
     bottom: 10px;
@@ -1677,6 +2517,14 @@ onBeforeUnmount(() => {
   .login-button,
   .page-turn-button,
   .input-shell {
+    transition-duration: 1ms;
+  }
+
+  .auth-form-stage,
+  .auth-form-enter-active,
+  .auth-form-leave-active,
+  .auth-heading-enter-active,
+  .auth-heading-leave-active {
     transition-duration: 1ms;
   }
 }

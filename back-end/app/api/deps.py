@@ -71,3 +71,12 @@ async def get_user_by_sduid(db: AsyncSession, sduid: str) -> User | None:
         .where(AuthProfile.sduid == sduid)
     )
     return result.scalar_one_or_none()
+
+
+async def get_user_by_mobile(db: AsyncSession, mobile: str) -> User | None:
+    result = await db.execute(
+        select(User)
+        .join(AuthProfile, AuthProfile.user_id == User.id)
+        .where(AuthProfile.mobile == mobile)
+    )
+    return result.scalar_one_or_none()

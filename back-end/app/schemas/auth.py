@@ -15,7 +15,11 @@ class RegistrationSmsRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    account: str = Field(min_length=1, max_length=255, description="Email or verified SDU ID")
+    account: str = Field(
+        min_length=1,
+        max_length=255,
+        description="Email, verified mobile number, or verified SDU ID",
+    )
     password: str = Field(min_length=1, max_length=128)
 
 

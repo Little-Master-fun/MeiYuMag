@@ -20,6 +20,27 @@ interface AuthResponse {
 
 const API = '/api/v1'
 
+async function getRequestErrorMessage(requestError: any, fallback: string): Promise<string> {
+  let responseData = requestError.response?.data
+  if (responseData instanceof Blob) {
+    try {
+      responseData = JSON.parse(await responseData.text())
+    } catch {
+      return requestError.message || fallback
+    }
+  }
+
+  const detail = responseData?.detail
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => (typeof item?.msg === 'string' ? item.msg : ''))
+      .filter(Boolean)
+    if (messages.length) return messages.join('；')
+  }
+  return requestError.message || fallback
+}
+
 export const useAuthStore = defineStore('auth', () => {
   const token = ref<string | null>(localStorage.getItem('access_token'))
   const refreshToken = ref<string | null>(localStorage.getItem('refresh_token'))
@@ -55,7 +76,7 @@ export const useAuthStore = defineStore('auth', () => {
       saveAuth(data)
       return true
     } catch (requestError: any) {
-      error.value = requestError.response?.data?.detail || requestError.message || '登录失败'
+      error.value = await getRequestErrorMessage(requestError, '登录失败')
       return false
     } finally {
       loading.value = false
@@ -87,10 +108,47 @@ export const useAuthStore = defineStore('auth', () => {
       saveAuth(data)
       return true
     } catch (requestError: any) {
-      error.value = requestError.response?.data?.detail || requestError.message || '注册失败'
+      error.value = await getRequestErrorMessage(requestError, '注册失败')
       return false
     } finally {
       loading.value = false
+    }
+  }
+
+  async function requestRegistrationCaptcha(): Promise<Blob | null> {
+    error.value = null
+
+    try {
+      const { data } = await axios.post<Blob>(`${API}/auth/register/code`, null, {
+        responseType: 'blob',
+        withCredentials: true,
+      })
+      return data
+    } catch (requestError: any) {
+      error.value = await getRequestErrorMessage(requestError, '图片验证码加载失败')
+      return null
+    }
+  }
+
+  async function sendRegistrationSms(
+    mobile: string,
+    imageCode: string,
+  ): Promise<boolean> {
+    error.value = null
+
+    try {
+      await axios.post(
+        `${API}/auth/register/sms`,
+        {
+          mobile,
+          image_code: imageCode,
+        },
+        { withCredentials: true },
+      )
+      return true
+    } catch (requestError: any) {
+      error.value = await getRequestErrorMessage(requestError, '短信验证码发送失败')
+      return false
     }
   }
 
@@ -104,7 +162,7 @@ export const useAuthStore = defineStore('auth', () => {
       user.value = data
       return true
     } catch (requestError: any) {
-      error.value = requestError.response?.data?.detail || requestError.message || '令牌验证失败'
+      error.value = await getRequestErrorMessage(requestError, '令牌验证失败')
       return false
     } finally {
       loading.value = false
@@ -132,6 +190,8 @@ export const useAuthStore = defineStore('auth', () => {
     isAdmin,
     login,
     register,
+    requestRegistrationCaptcha,
+    sendRegistrationSms,
     fetchMe,
     logout,
   }

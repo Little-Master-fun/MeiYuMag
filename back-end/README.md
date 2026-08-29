@@ -114,7 +114,7 @@ Content-Type: application/json
 
 The backend stores this value in `User.department`, which is used as the user's default organization/department information.
 
-`/auth/login` accepts a registered email, local account, or verified SDU ID:
+`/auth/login` accepts a registered email, verified mobile number, or verified SDU ID:
 
 ```json
 {

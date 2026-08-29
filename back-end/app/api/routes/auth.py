@@ -6,7 +6,12 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_user_by_email, get_user_by_sduid
+from app.api.deps import (
+    get_current_user,
+    get_user_by_email,
+    get_user_by_mobile,
+    get_user_by_sduid,
+)
 from app.core.security import (
     create_access_token,
     create_refresh_token,
@@ -119,6 +124,8 @@ async def login(
     user = await get_user_by_email(db, account)
     if user is None:
         user = await get_user_by_sduid(db, account)
+    if user is None:
+        user = await get_user_by_mobile(db, account)
     if user is None or not verify_password(payload.password, user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
