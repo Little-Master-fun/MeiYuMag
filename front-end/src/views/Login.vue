@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
+import axios from 'axios'
 import * as THREE from 'three'
 import { gsap } from 'gsap'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
@@ -21,6 +22,8 @@ import { useAuthStore } from '@/stores/auth'
 import {
   createParchmentPageCanvas,
   type ParchmentPageCanvas,
+  type VenueUsageBoard,
+  type VenueUsageItem,
 } from '@/assets/textures/parchmentPage'
 import {
   enablePageTurnDeformation,
@@ -30,6 +33,7 @@ import { projectPageContentOntoMaterial } from '@/assets/shaders/pageContent'
 import { enableTreeCrownWind, type WindShaderUniforms } from '@/assets/shaders/treeWind'
 
 const viewport = ref<HTMLDivElement | null>(null)
+const venueSelector = ref<HTMLElement | null>(null)
 const authFormStage = ref<HTMLDivElement | null>(null)
 const loadingProgress = ref(0)
 const loadError = ref('')
@@ -63,6 +67,35 @@ const pageTurnEnabled = false
 
 const auth = useAuthStore()
 
+interface VenueApiItem {
+  id: number
+  name: string
+}
+
+interface VenueCalendarEventApi {
+  id: string
+  title: string
+  organization: string | null
+  borrow_organization: string | null
+  purpose_summary: string | null
+  start_at: string
+  end_at: string
+  status: string
+}
+
+interface VenueUsageRangeApi {
+  start_date: string
+  end_date: string
+  venues: Array<{
+    venue: VenueApiItem
+    events: VenueCalendarEventApi[]
+  }>
+}
+
+const venueOptions = ref<VenueApiItem[]>([])
+const selectedVenueId = ref<number | null>(null)
+const venueSelectorReady = ref(false)
+
 let renderer: THREE.WebGLRenderer | null = null
 let scene: THREE.Scene | null = null
 let camera: THREE.PerspectiveCamera | null = null
@@ -74,6 +107,9 @@ let resizeObserver: ResizeObserver | null = null
 let animationFrame = 0
 let smsCountdownTimer: ReturnType<typeof setInterval> | null = null
 let topPage: THREE.Mesh | null = null
+let paperSurfaceMesh: THREE.Mesh | null = null
+let paperVisibleFacePoints: THREE.Vector3[] = []
+let paperVisibleFaceZ = 0
 let pageTurnShader: PageTurnShaderUniforms | null = null
 let pageContentCanvas: ParchmentPageCanvas | null = null
 let pageTurnTimeline: gsap.core.Timeline | null = null
@@ -234,6 +270,9 @@ function resetTopPage() {
   }
   pageTurning.value = false
   pageTurnCompleted.value = false
+  venueOptions.value = []
+  selectedVenueId.value = null
+  venueSelectorReady.value = false
 }
 
 function triggerPageTurn() {
@@ -509,7 +548,7 @@ function startCameraEntrance(object: THREE.Object3D, framingObject: THREE.Object
     camera.position.copy(finalCameraPosition)
     camera.lookAt(endCameraTarget)
     controls.target.copy(endCameraTarget)
-    controls.enabled = true
+    controls.enabled = false
     controls.autoRotate = false
     controls.update()
     loginPanelVisible.value = true
@@ -859,7 +898,7 @@ function playPostLoginCamera() {
     camera.lookAt(endTarget)
     controls.target.copy(endTarget)
     applyPostLoginClipboardTransform()
-    controls.enabled = true
+    controls.enabled = false
     controls.update()
     cinematicActive.value = false
     return
@@ -932,7 +971,7 @@ function updateCameraEntrance(now: number) {
     camera.position.copy(finalCameraPosition ?? camera.position)
     camera.lookAt(cameraFlight.endTarget)
     controls.target.copy(cameraFlight.endTarget)
-    controls.enabled = true
+    controls.enabled = false
     controls.autoRotate = false
     controls.update()
     cameraFlight = null
@@ -997,7 +1036,7 @@ function updatePostLoginCamera(now: number) {
     camera.lookAt(postLoginFlight.endTarget)
     controls.target.copy(postLoginFlight.endTarget)
     applyPostLoginClipboardTransform()
-    controls.enabled = true
+    controls.enabled = false
     controls.update()
     postLoginFlight = null
     cinematicActive.value = false
@@ -1075,6 +1114,128 @@ function handlePaperPointerLeave() {
   if (renderer) renderer.domElement.style.cursor = ''
 }
 
+function cachePaperFacePoints(paper: THREE.Mesh) {
+  paper.geometry.computeBoundingBox()
+  const bounds = paper.geometry.boundingBox
+  const positions = paper.geometry.getAttribute('position')
+  const normals = paper.geometry.getAttribute('normal')
+  paperVisibleFacePoints = []
+  if (
+    !bounds
+    || !(positions instanceof THREE.BufferAttribute)
+    || !(normals instanceof THREE.BufferAttribute)
+  ) return
+
+  const depth = Math.max(bounds.max.z - bounds.min.z, 0.00001)
+  const clusterSize = depth * 0.035
+  const point = new THREE.Vector3()
+  const normal = new THREE.Vector3()
+  const faceClusters = new Map<number, THREE.Vector3[]>()
+
+  for (let index = 0; index < positions.count; index += 1) {
+    point.fromBufferAttribute(positions, index)
+    normal.fromBufferAttribute(normals, index)
+    if (Math.abs(normal.z) < 0.85) continue
+
+    const clusterKey = Math.round(point.z / clusterSize)
+    const cluster = faceClusters.get(clusterKey) ?? []
+    cluster.push(point.clone())
+    faceClusters.set(clusterKey, cluster)
+  }
+
+  let largestSurfaceArea = Number.NEGATIVE_INFINITY
+  for (const cluster of faceClusters.values()) {
+    const surfaceBounds = new THREE.Box3().setFromPoints(cluster)
+    const surfaceArea = (surfaceBounds.max.x - surfaceBounds.min.x)
+      * (surfaceBounds.max.y - surfaceBounds.min.y)
+    if (surfaceArea <= largestSurfaceArea) continue
+
+    largestSurfaceArea = surfaceArea
+    paperVisibleFacePoints = cluster
+    paperVisibleFaceZ = cluster.reduce((sum, facePoint) => sum + facePoint.z, 0) / cluster.length
+  }
+}
+
+function updateVenueSelectorPosition() {
+  if (
+    !venueSelector.value
+    || !paperSurfaceMesh
+    || !renderer
+    || !camera
+    || !venueSelectorReady.value
+  ) return
+
+  const selectorBounds = venueSelector.value.getBoundingClientRect()
+  const rendererBounds = renderer.domElement.getBoundingClientRect()
+  if (!selectorBounds.width || !rendererBounds.width || rendererBounds.width < 860) return
+
+  paperSurfaceMesh.geometry.computeBoundingBox()
+  const paperBounds = paperSurfaceMesh.geometry.boundingBox
+  if (!paperBounds) return
+
+  paperSurfaceMesh.updateWorldMatrix(true, false)
+  let minX = Number.POSITIVE_INFINITY
+  let maxX = Number.NEGATIVE_INFINITY
+  let minY = Number.POSITIVE_INFINITY
+  let maxY = Number.NEGATIVE_INFINITY
+  const projectedCorner = new THREE.Vector3()
+  for (const localPoint of paperVisibleFacePoints) {
+    projectedCorner
+        .copy(localPoint)
+        .applyMatrix4(paperSurfaceMesh.matrixWorld)
+        .project(camera)
+
+    const screenX = rendererBounds.left
+      + (projectedCorner.x * 0.5 + 0.5) * rendererBounds.width
+      - selectorBounds.left
+    const screenY = rendererBounds.top
+      + (-projectedCorner.y * 0.5 + 0.5) * rendererBounds.height
+      - selectorBounds.top
+    minX = Math.min(minX, screenX)
+    maxX = Math.max(maxX, screenX)
+    minY = Math.min(minY, screenY)
+    maxY = Math.max(maxY, screenY)
+  }
+
+  // The broad front plane supplies the precise left/right paper edges. Keep
+  // the full geometry height for the deliberately irregular top and bottom.
+  for (const x of [paperBounds.min.x, paperBounds.max.x]) {
+    for (const y of [paperBounds.min.y, paperBounds.max.y]) {
+      projectedCorner
+        .set(x, y, paperVisibleFaceZ)
+        .applyMatrix4(paperSurfaceMesh.matrixWorld)
+        .project(camera)
+      const screenY = rendererBounds.top
+        + (-projectedCorner.y * 0.5 + 0.5) * rendererBounds.height
+        - selectorBounds.top
+      minY = Math.min(minY, screenY)
+      maxY = Math.max(maxY, screenY)
+    }
+  }
+
+  if (![minX, maxX, minY, maxY].every(Number.isFinite)) return
+
+  const paperHeight = maxY - minY
+  const leftSlots = [0.14, 0.31, 0.47, 0.64, 0.83]
+  const rightSlots = [0.21, 0.38, 0.56, 0.75]
+  const tabClips = venueSelector.value.querySelectorAll<HTMLElement>('.venue-tab-clip')
+
+  tabClips.forEach((tabClip, index) => {
+    const isLeft = index % 2 === 0
+    const sideIndex = Math.floor(index / 2)
+    const verticalRatio = isLeft
+      ? (leftSlots[sideIndex] ?? 0.5)
+      : (rightSlots[sideIndex] ?? 0.5)
+
+    // Each clip ends exactly at the projected paper edge. The button extends
+    // 14px beneath it, but that part is clipped so the real 3D sheet remains
+    // visible in front and creates a convincing foreground occlusion.
+    tabClip.style.left = `${isLeft ? 0 : maxX}px`
+    tabClip.style.width = `${isLeft ? minX : selectorBounds.width - maxX}px`
+    tabClip.style.top = `${minY + paperHeight * verticalRatio}px`
+  })
+}
+
 function animate() {
   if (!renderer || !scene || !camera) return
   animationFrame = requestAnimationFrame(animate)
@@ -1088,6 +1249,7 @@ function animate() {
   const now = performance.now()
   const cameraIsMoving = updateCameraEntrance(now) || updatePostLoginCamera(now)
   if (!cameraIsMoving) controls?.update()
+  updateVenueSelectorPosition()
   updateCameraReadout()
   renderer.render(scene, camera)
 }
@@ -1104,11 +1266,112 @@ async function handleLogin() {
 
   if (success) {
     loginSucceeded.value = true
+    void loadVenueUsageBoard()
     playPostLoginCamera()
     return
   }
 
   formError.value = auth.error || '登录失败，请检查账号和密码'
+}
+
+function getLocalDateKey(date: Date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
+
+function cleanPurposeSummary(value: string | null) {
+  if (!value) return '场地使用申请'
+  return value.replace(/^\[DEMO_USAGE:[^\]]+\]\s*/, '')
+}
+
+function offsetDate(date: Date, days: number) {
+  const nextDate = new Date(date)
+  nextDate.setDate(nextDate.getDate() + days)
+  return nextDate
+}
+
+async function loadVenueUsageBoard() {
+  if (!pageContentCanvas) return
+  const today = new Date()
+  const dateKey = getLocalDateKey(today)
+  const mode = auth.isAdmin ? 'management' : 'user-detail'
+  const rangeStart = getLocalDateKey(mode === 'management' ? today : offsetDate(today, -15))
+  const rangeEnd = getLocalDateKey(mode === 'management' ? today : offsetDate(today, 15))
+  venueSelectorReady.value = false
+  const loadingBoard: VenueUsageBoard = {
+    mode,
+    date: dateKey,
+    rangeStart,
+    rangeEnd,
+    state: 'loading',
+    venues: [],
+  }
+  pageContentCanvas.updateUsageBoard(loadingBoard)
+
+  try {
+    const { data } = await axios.get<VenueUsageRangeApi>('/api/v1/venues/usage-range', {
+      params: { start_date: rangeStart, end_date: rangeEnd },
+    })
+
+    const usageItems: VenueUsageItem[] = data.venues.map(({ venue, events }) => ({
+      id: venue.id,
+      name: venue.name,
+      events: events
+        .filter(
+          (event) =>
+            mode !== 'management' || getLocalDateKey(new Date(event.start_at)) === dateKey,
+        )
+        .sort(
+          (first, second) =>
+            new Date(first.start_at).getTime() - new Date(second.start_at).getTime(),
+        )
+        .map((event) => ({
+          id: event.id,
+          organization:
+            event.borrow_organization || event.organization || event.title || '场地申请',
+          purpose: cleanPurposeSummary(event.purpose_summary),
+          startAt: event.start_at,
+          endAt: event.end_at,
+          status: event.status,
+        })),
+    }))
+
+    pageContentCanvas.updateUsageBoard({
+      mode,
+      date: dateKey,
+      rangeStart: data.start_date,
+      rangeEnd: data.end_date,
+      state: 'ready',
+      venues: usageItems,
+    })
+    if (mode === 'user-detail') {
+      venueOptions.value = data.venues.map(({ venue }) => venue)
+      selectedVenueId.value = venueOptions.value[0]?.id ?? null
+      venueSelectorReady.value = venueOptions.value.length > 0
+    } else {
+      venueOptions.value = []
+      selectedVenueId.value = null
+    }
+  } catch (error) {
+    console.error('[场地使用看板] 数据加载失败', error)
+    pageContentCanvas.updateUsageBoard({
+      mode,
+      date: dateKey,
+      rangeStart,
+      rangeEnd,
+      state: 'error',
+      venues: [],
+      error: '请确认本地后端服务已启动',
+    })
+    venueOptions.value = []
+    selectedVenueId.value = null
+    venueSelectorReady.value = false
+  }
+}
+
+function selectUsageVenue(venueId: number) {
+  if (venueId === selectedVenueId.value) return
+  selectedVenueId.value = venueId
+  pageContentCanvas?.selectVenue(venueId)
 }
 
 function stopSmsCountdown() {
@@ -1253,6 +1516,7 @@ async function handleRegister() {
   if (success) {
     loginSucceeded.value = true
     stopSmsCountdown()
+    void loadVenueUsageBoard()
     playPostLoginCamera()
     return
   }
@@ -1295,8 +1559,9 @@ onMounted(() => {
   controls.dampingFactor = 0.06
   controls.enabled = false
   controls.autoRotate = false
-  controls.enablePan = true
-  controls.mouseButtons.RIGHT = THREE.MOUSE.PAN
+  controls.enableRotate = false
+  controls.enablePan = false
+  controls.enableZoom = false
   renderer.domElement.addEventListener('wheel', handlePaperWheel, {
     capture: true,
     passive: false,
@@ -1346,7 +1611,6 @@ onMounted(() => {
       const topPageObject = clipboardModel.getObjectByName('Top_Page')
       topPage = topPageObject instanceof THREE.Mesh ? topPageObject : null
       pageContentCanvas = createParchmentPageCanvas(
-        'Holle world',
         renderer?.capabilities.getMaxAnisotropy() ?? 1,
       )
       const leafyTreeParts: THREE.Mesh[] = []
@@ -1365,6 +1629,10 @@ onMounted(() => {
 
       clipboardModel.traverse((child) => {
         if (!(child instanceof THREE.Mesh)) return
+        if (child.name === 'Downloaded_Clipboard_Mesh_1') {
+          paperSurfaceMesh = child
+          cachePaperFacePoints(child)
+        }
         child.castShadow = true
         child.receiveShadow = true
         const materials = Array.isArray(child.material) ? child.material : [child.material]
@@ -1461,6 +1729,9 @@ onBeforeUnmount(() => {
   houseModel = null
   clipboardModel = null
   topPage = null
+  paperSurfaceMesh = null
+  paperVisibleFacePoints = []
+  paperVisibleFaceZ = 0
   pageTurnShader = null
   pageContentCanvas = null
   pageTurnTimeline = null
@@ -1797,6 +2068,34 @@ onBeforeUnmount(() => {
       </section>
     </Transition>
 
+    <Transition name="venue-selector">
+      <nav
+        v-if="venueSelectorReady && !cinematicActive"
+        ref="venueSelector"
+        class="venue-floating-selector"
+        aria-label="选择要查看的场地"
+      >
+        <span
+          v-for="(venue, index) in venueOptions"
+          :key="venue.id"
+          class="venue-tab-clip"
+          :class="index % 2 === 0 ? 'left' : 'right'"
+        >
+          <button
+            type="button"
+            class="venue-float-button"
+            :class="{ active: selectedVenueId === venue.id }"
+            :style="{ animationDelay: `${index * 65}ms` }"
+            :aria-pressed="selectedVenueId === venue.id"
+            @click="selectUsageVenue(venue.id)"
+          >
+            <span class="venue-button-mark" aria-hidden="true" />
+            <span>{{ venue.name }}</span>
+          </button>
+        </span>
+      </nav>
+    </Transition>
+
     <button
       v-if="pageTurnEnabled && modelReady && pageTurnAvailable && !cinematicActive"
       class="page-turn-button"
@@ -1807,9 +2106,6 @@ onBeforeUnmount(() => {
       {{ pageTurning ? '纸页正在落下…' : pageTurnCompleted ? '再次翻页' : '翻到下一页' }}
     </button>
 
-    <div v-if="modelReady && !cinematicActive" class="viewer-hint">
-      左键旋转 · 右键平移 · 滚轮缩放
-    </div>
   </main>
 </template>
 
@@ -2375,6 +2671,159 @@ onBeforeUnmount(() => {
   }
 }
 
+.venue-floating-selector {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+}
+
+.venue-tab-clip {
+  position: absolute;
+  height: 88px;
+  overflow: hidden;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.venue-float-button {
+  --venue-rotation: 0deg;
+  position: absolute;
+  top: 50%;
+  display: flex;
+  align-items: center;
+  min-width: 142px;
+  min-height: 39px;
+  max-width: 188px;
+  gap: 8px;
+  padding: 8px 13px 8px 11px;
+  border: 1px solid rgba(91, 113, 88, 0.42);
+  border-radius: 15px 5px 5px 15px;
+  background:
+    linear-gradient(138deg, rgba(255, 253, 242, 0.94), rgba(225, 216, 191, 0.88)),
+    #eee4ca;
+  box-shadow:
+    0 9px 22px rgba(60, 55, 39, 0.15),
+    inset 0 1px rgba(255, 255, 255, 0.75);
+  color: #4f5f4f;
+  font-family: 'Songti SC', 'STSong', serif;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.25;
+  text-align: left;
+  cursor: pointer;
+  pointer-events: auto;
+  backdrop-filter: blur(8px);
+  transform: translateY(-50%) rotate(var(--venue-rotation));
+  transition:
+    color 180ms ease,
+    border-color 180ms ease,
+    background 220ms ease,
+    box-shadow 220ms ease,
+    transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  animation: venue-button-pop 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.venue-float-button:hover {
+  border-color: rgba(71, 102, 78, 0.7);
+  box-shadow:
+    0 13px 28px rgba(60, 55, 39, 0.2),
+    inset 0 1px rgba(255, 255, 255, 0.78);
+  transform: translateY(calc(-50% - 3px)) rotate(var(--venue-rotation)) scale(1.035);
+}
+
+.venue-float-button.active {
+  border-color: rgba(52, 86, 67, 0.78);
+  background:
+    linear-gradient(138deg, rgba(255, 255, 255, 0.08), transparent 55%),
+    #536f5c;
+  box-shadow:
+    0 12px 28px rgba(44, 72, 56, 0.25),
+    inset 0 1px rgba(255, 255, 255, 0.18);
+  color: #fbf3df;
+}
+
+.venue-button-mark {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border: 1px solid currentColor;
+  border-radius: 70% 30% 65% 35%;
+  background: rgba(88, 116, 91, 0.18);
+  transform: rotate(28deg);
+}
+
+.venue-float-button.active .venue-button-mark {
+  background: #e6d29f;
+}
+
+.venue-tab-clip.left .venue-float-button {
+  right: -14px;
+  flex-direction: row-reverse;
+  justify-content: flex-start;
+  border-radius: 15px 4px 4px 15px;
+  text-align: right;
+}
+
+.venue-tab-clip.right .venue-float-button {
+  left: -14px;
+  border-radius: 4px 15px 15px 4px;
+}
+
+.venue-tab-clip:nth-child(1) .venue-float-button {
+  --venue-rotation: -2deg;
+}
+
+.venue-tab-clip:nth-child(2) .venue-float-button {
+  --venue-rotation: 2deg;
+}
+
+.venue-tab-clip:nth-child(3) .venue-float-button {
+  --venue-rotation: 1.5deg;
+}
+
+.venue-tab-clip:nth-child(4) .venue-float-button {
+  --venue-rotation: -2.5deg;
+}
+
+.venue-tab-clip:nth-child(5) .venue-float-button {
+  --venue-rotation: -1deg;
+}
+
+.venue-tab-clip:nth-child(6) .venue-float-button {
+  --venue-rotation: 2deg;
+}
+
+.venue-tab-clip:nth-child(7) .venue-float-button {
+  --venue-rotation: 2.5deg;
+}
+
+.venue-tab-clip:nth-child(8) .venue-float-button {
+  --venue-rotation: -1.5deg;
+}
+
+.venue-tab-clip:nth-child(9) .venue-float-button {
+  --venue-rotation: -2deg;
+}
+
+.venue-selector-enter-active,
+.venue-selector-leave-active {
+  transition: opacity 320ms ease;
+}
+
+.venue-selector-enter-from,
+.venue-selector-leave-to {
+  opacity: 0;
+}
+
+@keyframes venue-button-pop {
+  from {
+    opacity: 0;
+    filter: blur(5px);
+    transform: translateY(-35%) rotate(var(--venue-rotation)) scale(0.82);
+  }
+}
+
 .page-turn-button {
   position: absolute;
   bottom: 24px;
@@ -2414,21 +2863,6 @@ onBeforeUnmount(() => {
   opacity: 0.7;
 }
 
-.viewer-hint {
-  position: absolute;
-  right: 18px;
-  bottom: 18px;
-  padding: 9px 13px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 999px;
-  background: rgba(7, 17, 13, 0.62);
-  color: rgba(238, 255, 247, 0.58);
-  font-size: 12px;
-  letter-spacing: 0.04em;
-  backdrop-filter: blur(12px);
-  pointer-events: none;
-}
-
 @media (max-width: 859px) {
   .login-card {
     top: auto;
@@ -2459,14 +2893,52 @@ onBeforeUnmount(() => {
     transform: translate(50%, 32px) scale(0.97);
   }
 
-  .viewer-hint {
-    display: none;
-  }
-
   .page-turn-button {
     top: 18px;
     bottom: auto;
     left: 50%;
+  }
+
+  .venue-floating-selector {
+    top: auto;
+    right: 12px;
+    bottom: 12px;
+    left: 12px;
+    display: flex;
+    gap: 8px;
+    padding: 7px;
+    overflow-x: auto;
+    border: 1px solid rgba(255, 255, 255, 0.34);
+    border-radius: 16px 5px 16px 5px;
+    background: rgba(238, 228, 202, 0.76);
+    backdrop-filter: blur(12px);
+    scrollbar-width: none;
+  }
+
+  .venue-floating-selector::-webkit-scrollbar {
+    display: none;
+  }
+
+  .venue-tab-clip,
+  .venue-tab-clip:nth-child(n) {
+    position: static;
+    width: auto !important;
+    height: auto;
+    overflow: visible;
+    transform: none;
+  }
+
+  .venue-float-button,
+  .venue-tab-clip:nth-child(n) .venue-float-button {
+    position: static;
+    flex: 0 0 auto;
+    max-width: none;
+    white-space: nowrap;
+    transform: none;
+  }
+
+  .venue-float-button:hover {
+    transform: translateY(-2px);
   }
 }
 
@@ -2525,6 +2997,11 @@ onBeforeUnmount(() => {
   .auth-form-leave-active,
   .auth-heading-enter-active,
   .auth-heading-leave-active {
+    transition-duration: 1ms;
+  }
+
+  .venue-float-button {
+    animation-duration: 1ms;
     transition-duration: 1ms;
   }
 }

@@ -22,6 +22,7 @@ class CalendarEvent(BaseModel):
     organization: str | None = None
     borrow_organization: str | None = None
     applicant_name: str | None = None
+    purpose_summary: str | None = None
     start_at: datetime
     end_at: datetime
     status: str
@@ -63,3 +64,15 @@ class VenueMonthCalendarResponse(BaseModel):
     events: list[CalendarEvent]
     days: dict[str, CalendarDay]
     legend: list[CalendarStatusLegendItem]
+
+
+class VenueRangeUsageItem(BaseModel):
+    venue: VenueRead
+    events: list[CalendarEvent] = Field(default_factory=list)
+
+
+class VenueUsageRangeResponse(BaseModel):
+    start_date: date
+    end_date: date
+    timezone: str = "Asia/Shanghai"
+    venues: list[VenueRangeUsageItem]

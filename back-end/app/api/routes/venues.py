@@ -1,5 +1,5 @@
 from calendar import monthrange
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import and_, select
@@ -13,6 +13,8 @@ from app.schemas.venue import (
     CalendarEvent,
     CalendarStatusLegendItem,
     VenueMonthCalendarResponse,
+    VenueRangeUsageItem,
+    VenueUsageRangeResponse,
     VenueRead,
 )
 
@@ -33,10 +35,97 @@ def occupancy_type(status: str) -> str:
     return "pre_reserved" if status == "pre_reserved" else "confirmed"
 
 
+def build_calendar_event(
+    reservation: ReservationCalendar,
+    application: Application | None,
+    venue: Venue,
+) -> CalendarEvent:
+    title = (
+        application.borrow_organization
+        if application and application.borrow_organization
+        else application.organization
+        if application and application.organization
+        else "场地预约"
+    )
+    return CalendarEvent(
+        id=f"reservation-{reservation.id}",
+        application_id=reservation.application_id or 0,
+        venue_id=venue.id,
+        venue_name=venue.name,
+        application_type=application.application_type if application else "unknown",
+        title=title,
+        organization=application.organization if application else None,
+        applicant_name=application.applicant_name if application else None,
+        purpose_summary=application.purpose_summary if application else None,
+        start_at=reservation.start_at,
+        end_at=reservation.end_at,
+        status=reservation.status,
+        occupancy_type=occupancy_type(reservation.status),
+        color=calendar_color(reservation.status),
+        borrow_organization=application.borrow_organization if application else None,
+    )
+
+
 @router.get("", response_model=list[VenueRead])
 async def list_venues(db: AsyncSession = Depends(get_db)) -> list[VenueRead]:
     result = await db.execute(select(Venue).order_by(Venue.name))
     return [VenueRead.model_validate(venue) for venue in result.scalars()]
+
+
+@router.get("/usage-range", response_model=VenueUsageRangeResponse)
+async def get_venue_usage_range(
+    start_date: date = Query(),
+    end_date: date = Query(),
+    db: AsyncSession = Depends(get_db),
+) -> VenueUsageRangeResponse:
+    if end_date < start_date:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="end_date must not be earlier than start_date",
+        )
+    if (end_date - start_date).days > 62:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="date range cannot exceed 63 days",
+        )
+
+    venues_result = await db.execute(select(Venue).order_by(Venue.name))
+    venues = list(venues_result.scalars())
+    events_by_venue: dict[int, list[CalendarEvent]] = {venue.id: [] for venue in venues}
+    venue_by_id = {venue.id: venue for venue in venues}
+    range_start = datetime.combine(start_date, time.min)
+    range_end = datetime.combine(end_date + timedelta(days=1), time.min)
+
+    result = await db.execute(
+        select(ReservationCalendar, Application)
+        .join(Application, Application.id == ReservationCalendar.application_id, isouter=True)
+        .where(
+            and_(
+                ReservationCalendar.start_at < range_end,
+                ReservationCalendar.end_at >= range_start,
+                ReservationCalendar.status != "cancelled",
+            )
+        )
+        .order_by(ReservationCalendar.start_at)
+    )
+    for reservation, application in result.all():
+        venue = venue_by_id.get(reservation.venue_id)
+        if venue is not None:
+            events_by_venue[venue.id].append(
+                build_calendar_event(reservation, application, venue)
+            )
+
+    return VenueUsageRangeResponse(
+        start_date=start_date,
+        end_date=end_date,
+        venues=[
+            VenueRangeUsageItem(
+                venue=VenueRead.model_validate(venue),
+                events=events_by_venue[venue.id],
+            )
+            for venue in venues
+        ],
+    )
 
 
 @router.get("/{venue_id}/calendar", response_model=VenueMonthCalendarResponse)
@@ -81,31 +170,9 @@ async def get_venue_calendar(
 
     events: list[CalendarEvent] = []
     for reservation, application in result.all():
-        event_id = f"reservation-{reservation.id}"
-        title = (
-            application.borrow_organization
-            if application and application.borrow_organization
-            else application.organization
-            if application and application.organization
-            else "场地预约"
-        )
-        app_type = application.application_type if application else "unknown"
-        event = CalendarEvent(
-            id=event_id,
-            application_id=reservation.application_id or 0,
-            venue_id=venue_id,
-            venue_name=venue.name,
-            application_type=app_type,
-            title=title,
-            organization=application.organization if application else None,
-            applicant_name=application.applicant_name if application else None,
-            start_at=reservation.start_at,
-            end_at=reservation.end_at,
-            status=reservation.status,
-            occupancy_type=occupancy_type(reservation.status),
-            color=calendar_color(reservation.status),
-            borrow_organization=application.borrow_organization if application else None,
-        )
+        event = build_calendar_event(reservation, application, venue)
+        event_id = event.id
+        title = event.title
         events.append(event)
 
         day_key = reservation.start_at.date().isoformat()
