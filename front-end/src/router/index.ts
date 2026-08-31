@@ -9,6 +9,11 @@ const router = createRouter({
       name: 'login',
       component: () => import('@/views/Login.vue'),
     },
+    {
+      path: '/applications/new',
+      name: 'venue-application-placeholder',
+      component: () => import('@/views/VenueApplicationPlaceholder.vue'),
+    },
     { path: '/:pathMatch(.*)*', redirect: '/login' },
   ],
 })

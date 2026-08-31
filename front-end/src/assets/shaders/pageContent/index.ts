@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 
-interface MaterialBounds {
+export interface PageContentBounds {
   minX: number
   minY: number
   width: number
@@ -34,7 +34,7 @@ const pageContentFragmentChunk = `
   );
 `
 
-function getMaterialBounds(mesh: THREE.Mesh, materialIndex: number): MaterialBounds | null {
+function getMaterialBounds(mesh: THREE.Mesh, materialIndex: number): PageContentBounds | null {
   const geometry = mesh.geometry
   const position = geometry.getAttribute('position')
   if (!position) return null
@@ -70,14 +70,14 @@ export function projectPageContentOntoMaterial(
   mesh: THREE.Mesh,
   materialName: string,
   texture: THREE.CanvasTexture,
-) {
+): PageContentBounds | null {
   const sourceMaterials = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
   const materialIndex = sourceMaterials.findIndex((material) => material.name === materialName)
-  if (materialIndex < 0) return false
+  if (materialIndex < 0) return null
 
   const bounds = getMaterialBounds(mesh, materialIndex)
   const sourceMaterial = sourceMaterials[materialIndex]
-  if (!bounds || !(sourceMaterial instanceof THREE.MeshStandardMaterial)) return false
+  if (!bounds || !(sourceMaterial instanceof THREE.MeshStandardMaterial)) return null
 
   const material = sourceMaterial.clone()
   // The source OBJ contains paper folds extremely close to the board surface.
@@ -111,5 +111,5 @@ export function projectPageContentOntoMaterial(
   updatedMaterials[materialIndex] = material
   mesh.material = Array.isArray(mesh.material) ? updatedMaterials : material
   mesh.renderOrder = Math.max(mesh.renderOrder, 1)
-  return true
+  return bounds
 }

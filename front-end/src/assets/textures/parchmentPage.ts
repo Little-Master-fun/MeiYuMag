@@ -22,21 +22,55 @@ export interface VenueUsageItem {
   events: VenueUsageEvent[]
 }
 
+export interface PersonalHomeProfile {
+  email: string
+  organization: string
+  role: 'user' | 'admin'
+  verified: boolean
+  applicationAllowed: boolean
+}
+
+export interface PersonalApplicationItem {
+  id: number
+  applicationType: string
+  venueId: number | null
+  venueName: string
+  purpose: string
+  status: string
+  startAt: string | null
+  endAt: string | null
+  createdAt: string
+}
+
 export interface VenueUsageBoard {
-  mode: 'management' | 'user-matrix' | 'user-detail'
+  mode: 'management' | 'user-matrix' | 'user-detail' | 'profile'
   date: string
   rangeStart?: string
   rangeEnd?: string
   state: 'loading' | 'ready' | 'error'
   venues: VenueUsageItem[]
+  profile?: PersonalHomeProfile
+  applications?: PersonalApplicationItem[]
   error?: string
 }
+
+export type ParchmentPageAction =
+  | { type: 'switch-page'; page: 'profile' | 'calendar' }
+  | { type: 'supplement'; application: PersonalApplicationItem }
 
 export interface ParchmentPageCanvas {
   texture: THREE.CanvasTexture
   updateUsageBoard: (board: VenueUsageBoard) => void
+  transitionUsageBoard: (board: VenueUsageBoard) => void
   selectVenue: (venueId: number) => void
   scrollBy: (delta: number) => void
+  pointerMove: (normalizedX: number, normalizedY: number) => void
+  getApplicationTarget: (
+    normalizedX: number,
+    normalizedY: number,
+  ) => { venueId: number; venueName: string; date: string } | null
+  getPageAction: (normalizedX: number, normalizedY: number) => ParchmentPageAction | null
+  pointerLeave: () => void
   tick: () => void
 }
 
@@ -44,6 +78,17 @@ const PAGE_WIDTH = 1024
 const PAGE_HEIGHT = 1400
 const CONTENT_TOP = 660
 const CARD_GAP = 24
+const DETAIL_TABLE_X = 120
+const DETAIL_TABLE_Y = 632
+const DETAIL_TABLE_WIDTH = 784
+const DETAIL_HEADER_HEIGHT = 48
+const DETAIL_ROW_HEIGHT = 112
+const DETAIL_CALENDAR_COLUMNS = 7
+const DETAIL_CELL_WIDTH = DETAIL_TABLE_WIDTH / DETAIL_CALENDAR_COLUMNS
+
+function isHistoricalApplicationStatus(status: string) {
+  return ['completed', 'cancelled', 'rejected', 'ai_rejected'].includes(status)
+}
 
 const statusStyles: Record<string, { label: string; color: string; text: string }> = {
   confirmed: { label: '已确认', color: '#60745f', text: '#394c3b' },
@@ -97,8 +142,16 @@ function getHourValue(dateValue: string) {
 
 function calculateContentHeight(board: VenueUsageBoard) {
   if (board.state !== 'ready') return PAGE_HEIGHT
+  if (board.mode === 'profile') {
+    const applications = board.applications ?? []
+    const activeCount = applications.filter(
+      (application) => !isHistoricalApplicationStatus(application.status),
+    ).length
+    const historyCount = applications.length - activeCount
+    return Math.max(PAGE_HEIGHT, 850 + activeCount * 112 + historyCount * 92)
+  }
   if (board.mode === 'user-matrix') return 2400
-  if (board.mode === 'user-detail') return 2550
+  if (board.mode === 'user-detail') return PAGE_HEIGHT
   const cardsHeight = board.venues.reduce(
     (height, venue) => height + Math.max(166, 142 + venue.events.length * 42),
     0,
@@ -111,8 +164,9 @@ function drawStat(
   x: number,
   value: number,
   label: string,
+  y = 430,
 ) {
-  roundedRect(ctx, x, 430, 238, 118, 18)
+  roundedRect(ctx, x, y, 238, 118, 18)
   ctx.fillStyle = 'rgba(255, 252, 239, 0.3)'
   ctx.fill()
   ctx.strokeStyle = 'rgba(92, 72, 47, 0.16)'
@@ -122,10 +176,10 @@ function drawStat(
   ctx.textAlign = 'left'
   ctx.fillStyle = '#58452f'
   ctx.font = '600 48px "Palatino Linotype", Palatino, Georgia, serif'
-  ctx.fillText(String(value).padStart(2, '0'), x + 25, 492)
+  ctx.fillText(String(value).padStart(2, '0'), x + 25, y + 62)
   ctx.fillStyle = 'rgba(77, 60, 40, 0.6)'
   ctx.font = '24px "Songti SC", "STSong", serif'
-  ctx.fillText(label, x + 94, 491)
+  ctx.fillText(label, x + 94, y + 61)
 }
 
 function drawTimeline(
@@ -252,10 +306,7 @@ function getSlotColor(
   slotStart: number,
   slotEnd: number,
 ) {
-  const overlapping = events.filter((event) => {
-    if (getEventDateKey(event.startAt) !== dateKey) return false
-    return getHourValue(event.startAt) < slotEnd && getHourValue(event.endAt) > slotStart
-  })
+  const overlapping = getSlotEvents(events, dateKey, slotStart, slotEnd)
   if (!overlapping.length) return 'rgba(96, 116, 95, 0.1)'
   if (overlapping.some((event) => ['confirmed', 'reserved'].includes(event.status))) {
     return '#60745f'
@@ -263,6 +314,30 @@ function getSlotColor(
   if (overlapping.some((event) => event.status === 'supplement_required')) return '#9a6152'
   if (overlapping.some((event) => event.status === 'pending_admin_pre_review')) return '#737583'
   return '#ad8248'
+}
+
+function getSlotEvents(
+  events: VenueUsageEvent[],
+  dateKey: string,
+  slotStart: number,
+  slotEnd: number,
+) {
+  return events.filter((event) => {
+    if (getEventDateKey(event.startAt) !== dateKey) return false
+    return getHourValue(event.startAt) < slotEnd && getHourValue(event.endAt) > slotStart
+  })
+}
+
+function getDisplayDates(board: VenueUsageBoard) {
+  const rangeDates = getDateRange(
+    board.rangeStart || board.date,
+    board.rangeEnd || board.date,
+  )
+  const todayIndex = Math.max(0, rangeDates.indexOf(board.date))
+  return [
+    ...rangeDates.slice(todayIndex),
+    ...rangeDates.slice(0, todayIndex).reverse(),
+  ]
 }
 
 function drawRangeLegend(
@@ -293,23 +368,23 @@ function drawUserRangeBoard(
   ctx.textAlign = 'left'
   ctx.fillStyle = 'rgba(89, 70, 47, 0.58)'
   ctx.font = '600 20px "Palatino Linotype", Palatino, serif'
-  ctx.fillText('MEIYU  ·  VENUE AVAILABILITY', 120, 208)
+  ctx.fillText('MEIYU  ·  VENUE AVAILABILITY', 120, 240)
   ctx.fillStyle = '#58452f'
   ctx.font = '600 70px "Songti SC", "STSong", Georgia, serif'
-  ctx.fillText('场地占用日历', 120, 300)
+  ctx.fillText('场地占用日历', 120, 312)
   ctx.fillStyle = 'rgba(77, 60, 40, 0.62)'
   ctx.font = '27px "Songti SC", "STSong", serif'
   ctx.fillText(
     `${board.rangeStart || board.date}  —  ${board.rangeEnd || board.date} · 前后各15天`,
     120,
-    354,
+    364,
   )
 
   ctx.strokeStyle = 'rgba(93, 73, 48, 0.25)'
   ctx.lineWidth = 2
   ctx.beginPath()
-  ctx.moveTo(120, 392)
-  ctx.lineTo(904, 392)
+  ctx.moveTo(120, 400)
+  ctx.lineTo(904, 400)
   ctx.stroke()
 
   if (board.state === 'loading') {
@@ -335,11 +410,7 @@ function drawUserRangeBoard(
     board.rangeStart || board.date,
     board.rangeEnd || board.date,
   )
-  const todayIndex = Math.max(0, rangeDates.indexOf(board.date))
-  const displayDates = [
-    ...rangeDates.slice(todayIndex),
-    ...rangeDates.slice(0, todayIndex).reverse(),
-  ]
+  const displayDates = getDisplayDates(board)
   const eventCount = board.venues.reduce((count, venue) => count + venue.events.length, 0)
   drawStat(ctx, 120, rangeDates.length, '查阅天数')
   drawStat(ctx, 393, board.venues.length, '开放场地')
@@ -489,12 +560,104 @@ function drawVenueDetailTimeline(
   })
 }
 
+function drawCalendarEventBars(
+  ctx: CanvasRenderingContext2D,
+  events: VenueUsageEvent[],
+  x: number,
+  y: number,
+  width: number,
+) {
+  if (!events.length) return
+  const startHour = 8
+  const endHour = 22
+  events.slice(0, 4).forEach((event, index) => {
+    const eventStart = THREE.MathUtils.clamp(getHourValue(event.startAt), startHour, endHour)
+    const eventEnd = THREE.MathUtils.clamp(getHourValue(event.endAt), startHour, endHour)
+    const eventX = x + ((eventStart - startHour) / (endHour - startHour)) * width
+    const eventWidth = Math.max(6, ((eventEnd - eventStart) / (endHour - startHour)) * width)
+    const style = statusStyles[event.status] ?? statusStyles.confirmed
+    ctx.fillStyle = style.color
+    roundedRect(ctx, eventX, y + index * 8, eventWidth, 6, 3)
+    ctx.fill()
+  })
+}
+
+function drawVenueUsageHoverCard(
+  ctx: CanvasRenderingContext2D,
+  dateKey: string,
+  events: VenueUsageEvent[],
+  rowY: number,
+  scrollY: number,
+) {
+  const date = new Date(`${dateKey}T12:00:00`)
+  const weekday = ['日', '一', '二', '三', '四', '五', '六'][date.getDay()]
+  const tooltipHeight = 188
+  const tooltipY = THREE.MathUtils.clamp(
+    rowY - tooltipHeight - 10,
+    scrollY + 410,
+    scrollY + PAGE_HEIGHT - tooltipHeight - 78,
+  )
+  const tooltipX = 138
+  const tooltipWidth = 748
+
+  ctx.save()
+  ctx.shadowColor = 'rgba(69, 53, 35, 0.2)'
+  ctx.shadowBlur = 24
+  ctx.shadowOffsetY = 10
+  roundedRect(ctx, tooltipX, tooltipY, tooltipWidth, tooltipHeight, 18)
+  ctx.fillStyle = 'rgba(250, 239, 203, 0.98)'
+  ctx.fill()
+  ctx.shadowColor = 'transparent'
+  ctx.strokeStyle = 'rgba(117, 86, 47, 0.32)'
+  ctx.lineWidth = 2
+  ctx.stroke()
+
+  ctx.textAlign = 'left'
+  ctx.fillStyle = '#58452f'
+  ctx.font = '600 24px "Songti SC", "STSong", serif'
+  ctx.fillText(
+    `${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getDate()).padStart(2, '0')} 周${weekday} · 占用详情`,
+    tooltipX + 22,
+    tooltipY + 37,
+  )
+  ctx.textAlign = 'right'
+  ctx.fillStyle = 'rgba(77, 60, 40, 0.55)'
+  ctx.font = '18px "Songti SC", "STSong", serif'
+  ctx.fillText('08:00 — 22:00', tooltipX + tooltipWidth - 22, tooltipY + 36)
+
+  drawVenueDetailTimeline(ctx, events, tooltipY + 78)
+
+  const event = events[0]
+  if (event) {
+    const style = statusStyles[event.status] ?? statusStyles.confirmed
+    ctx.textAlign = 'left'
+    ctx.fillStyle = style.color
+    ctx.beginPath()
+    ctx.arc(164, tooltipY + 136, 6, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.fillStyle = '#58452f'
+    ctx.font = '600 20px "Palatino Linotype", "Songti SC", serif'
+    ctx.fillText(`${formatTime(event.startAt)}–${formatTime(event.endAt)}`, 181, tooltipY + 143)
+    ctx.fillStyle = 'rgba(77, 60, 40, 0.72)'
+    ctx.font = '19px "Songti SC", "STSong", serif'
+    const description = `${event.organization} · ${event.purpose}`
+    ctx.fillText(description.length > 26 ? `${description.slice(0, 26)}…` : description, 348, tooltipY + 143)
+    ctx.textAlign = 'right'
+    ctx.fillStyle = style.text
+    ctx.font = '600 18px "Songti SC", "STSong", serif'
+    ctx.fillText(events.length > 1 ? `另有 ${events.length - 1} 项` : style.label, 860, tooltipY + 143)
+  }
+  ctx.restore()
+}
+
 function drawUserVenueDetailBoard(
   ctx: CanvasRenderingContext2D,
   board: VenueUsageBoard,
   selectedVenueId: number | null,
   scrollY: number,
   contentHeight: number,
+  hoveredDateKey: string | null,
+  hoveredDateKind: 'occupied' | 'available' | null,
 ) {
   ctx.clearRect(0, 0, PAGE_WIDTH, PAGE_HEIGHT)
   const selectedVenue =
@@ -505,23 +668,23 @@ function drawUserVenueDetailBoard(
   ctx.textAlign = 'left'
   ctx.fillStyle = 'rgba(89, 70, 47, 0.58)'
   ctx.font = '600 20px "Palatino Linotype", Palatino, serif'
-  ctx.fillText('MEIYU  ·  VENUE SCHEDULE', 120, 208)
+  ctx.fillText('MEIYU  ·  VENUE SCHEDULE', 120, 240)
   ctx.fillStyle = '#58452f'
   ctx.font = '600 62px "Songti SC", "STSong", Georgia, serif'
-  ctx.fillText(selectedVenue?.name || '场地使用详情', 120, 296)
+  ctx.fillText(selectedVenue?.name || '场地使用详情', 120, 312)
   ctx.fillStyle = 'rgba(77, 60, 40, 0.62)'
   ctx.font = '25px "Songti SC", "STSong", serif'
   ctx.fillText(
     `${board.rangeStart || board.date}  —  ${board.rangeEnd || board.date} · 点击两侧书签切换场地`,
     120,
-    352,
+    364,
   )
 
   ctx.strokeStyle = 'rgba(93, 73, 48, 0.25)'
   ctx.lineWidth = 2
   ctx.beginPath()
-  ctx.moveTo(120, 392)
-  ctx.lineTo(904, 392)
+  ctx.moveTo(120, 400)
+  ctx.lineTo(904, 400)
   ctx.stroke()
 
   if (board.state === 'loading') {
@@ -544,11 +707,9 @@ function drawUserVenueDetailBoard(
     board.rangeStart || board.date,
     board.rangeEnd || board.date,
   )
-  const todayIndex = Math.max(0, rangeDates.indexOf(board.date))
-  const displayDates = [
-    ...rangeDates.slice(todayIndex),
-    ...rangeDates.slice(0, todayIndex).reverse(),
-  ]
+  const firstRangeDate = new Date(`${rangeDates[0] ?? board.date}T12:00:00`)
+  const leadingEmptyCells = (firstRangeDate.getDay() + 6) % 7
+  const calendarRows = Math.ceil((leadingEmptyCells + rangeDates.length) / DETAIL_CALENDAR_COLUMNS)
   const occupiedDates = new Set(selectedVenue.events.map((event) => getEventDateKey(event.startAt)))
   drawStat(ctx, 120, rangeDates.length, '查阅天数')
   drawStat(ctx, 393, occupiedDates.size, '占用天数')
@@ -560,89 +721,362 @@ function drawUserVenueDetailBoard(
   drawRangeLegend(ctx, 574, '#737583', '审核中')
   drawRangeLegend(ctx, 734, '#9a6152', '待补充')
 
-  const tableX = 120
-  const tableY = 632
-  const tableWidth = 784
-  const headerHeight = 60
-  const rowHeight = 54
+  const tableX = DETAIL_TABLE_X
+  const tableY = DETAIL_TABLE_Y
+  const tableWidth = DETAIL_TABLE_WIDTH
+  const headerHeight = DETAIL_HEADER_HEIGHT
+  const rowHeight = DETAIL_ROW_HEIGHT
   roundedRect(ctx, tableX, tableY, tableWidth, headerHeight, 16)
   ctx.fillStyle = 'rgba(88, 69, 47, 0.08)'
   ctx.fill()
-  ctx.fillStyle = 'rgba(77, 60, 40, 0.54)'
-  ctx.font = '600 20px "Songti SC", "STSong", serif'
-  ctx.textAlign = 'left'
-  ctx.fillText('日期', tableX + 16, tableY + 38)
-  ctx.textAlign = 'center'
-  ctx.font = '18px "Palatino Linotype", Palatino, serif'
-  ;[8, 12, 16, 20, 22].forEach((hour) => {
-    const x = 278 + ((hour - 8) / 14) * 438
-    ctx.fillText(`${String(hour).padStart(2, '0')}:00`, x, tableY + 38)
+  const weekLabels = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+  weekLabels.forEach((label, columnIndex) => {
+    const x = tableX + columnIndex * DETAIL_CELL_WIDTH
+    ctx.textAlign = 'center'
+    ctx.fillStyle = columnIndex >= 5 ? 'rgba(142, 91, 55, 0.68)' : 'rgba(77, 60, 40, 0.62)'
+    ctx.font = '600 19px "Songti SC", "STSong", serif'
+    ctx.fillText(label, x + DETAIL_CELL_WIDTH / 2, tableY + 32)
   })
-  ctx.textAlign = 'right'
-  ctx.font = '600 20px "Songti SC", "STSong", serif'
-  ctx.fillText('申请状态', tableX + tableWidth - 16, tableY + 38)
 
-  displayDates.forEach((dateKey, index) => {
+  rangeDates.forEach((dateKey, dateIndex) => {
+    const calendarIndex = leadingEmptyCells + dateIndex
+    const columnIndex = calendarIndex % DETAIL_CALENDAR_COLUMNS
+    const rowIndex = Math.floor(calendarIndex / DETAIL_CALENDAR_COLUMNS)
     const date = new Date(`${dateKey}T12:00:00`)
-    const y = tableY + headerHeight + index * rowHeight
+    const x = tableX + columnIndex * DETAIL_CELL_WIDTH
+    const y = tableY + headerHeight + rowIndex * rowHeight
     const dayEvents = selectedVenue.events.filter(
       (event) => getEventDateKey(event.startAt) === dateKey,
     )
     const isToday = dateKey === board.date
     const isPast = dateKey < board.date
     const isWeekend = date.getDay() === 0 || date.getDay() === 6
+    const isAvailableFuture = dateKey > board.date && dayEvents.length === 0
 
-    if (isToday) {
-      roundedRect(ctx, tableX, y + 3, tableWidth, rowHeight - 6, 11)
-      ctx.fillStyle = 'rgba(173, 130, 72, 0.13)'
+    roundedRect(ctx, x + 2, y + 2, DETAIL_CELL_WIDTH - 4, rowHeight - 4, 10)
+    ctx.fillStyle = isToday
+      ? 'rgba(173, 130, 72, 0.15)'
+      : isAvailableFuture
+        ? 'rgba(255, 252, 239, 0.17)'
+      : isWeekend
+        ? 'rgba(112, 77, 48, 0.055)'
+        : 'rgba(255, 252, 239, 0.08)'
+    ctx.fill()
+    ctx.strokeStyle = isToday
+      ? 'rgba(137, 91, 45, 0.46)'
+      : 'rgba(93, 73, 48, 0.105)'
+    ctx.lineWidth = isToday ? 2 : 1
+    ctx.stroke()
+
+    if (dateKey === hoveredDateKey && dayEvents.length) {
+      roundedRect(ctx, x + 2, y + 2, DETAIL_CELL_WIDTH - 4, rowHeight - 4, 10)
+      ctx.fillStyle = 'rgba(173, 130, 72, 0.1)'
       ctx.fill()
-      ctx.strokeStyle = 'rgba(137, 91, 45, 0.42)'
+      ctx.strokeStyle = 'rgba(117, 86, 47, 0.34)'
       ctx.lineWidth = 2
       ctx.stroke()
-    } else if (isWeekend) {
-      ctx.fillStyle = 'rgba(88, 69, 47, 0.035)'
-      ctx.fillRect(tableX, y, tableWidth, rowHeight)
+    }
+
+    if (dateKey === hoveredDateKey && hoveredDateKind === 'available') {
+      roundedRect(ctx, x + 2, y + 2, DETAIL_CELL_WIDTH - 4, rowHeight - 4, 10)
+      ctx.fillStyle = 'rgba(173, 130, 72, 0.1)'
+      ctx.fill()
+      ctx.strokeStyle = 'rgba(117, 86, 47, 0.34)'
+      ctx.lineWidth = 2
+      ctx.stroke()
     }
 
     ctx.globalAlpha = isPast ? 0.74 : 1
-    const weekday = ['日', '一', '二', '三', '四', '五', '六'][date.getDay()]
-    const label = `${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getDate()).padStart(2, '0')} 周${weekday}`
     ctx.textAlign = 'left'
     ctx.fillStyle = isToday ? '#765525' : 'rgba(77, 60, 40, 0.72)'
-    ctx.font = `${isToday ? '600' : '400'} 21px "Palatino Linotype", "Songti SC", serif`
-    ctx.fillText(isToday ? `${label} · 今` : label, tableX + 14, y + 34)
+    ctx.font = `${isToday ? '600' : '400'} 20px "Palatino Linotype", "Songti SC", serif`
+    const dateLabel = date.getDate() === 1 || dateIndex === 0
+      ? `${date.getMonth() + 1}月${date.getDate()}日`
+      : String(date.getDate())
+    ctx.fillText(isToday ? `${dateLabel} · 今` : dateLabel, x + 10, y + 27)
 
-    drawVenueDetailTimeline(ctx, dayEvents, y + 21)
-    ctx.textAlign = 'right'
+    drawCalendarEventBars(ctx, dayEvents, x + 10, y + 43, DETAIL_CELL_WIDTH - 20)
+
+    ctx.textAlign = 'left'
     if (!dayEvents.length) {
-      ctx.fillStyle = '#60745f'
-      ctx.font = '600 20px "Songti SC", "STSong", serif'
-      ctx.fillText('全天可申请', tableX + tableWidth - 14, y + 34)
+      ctx.fillStyle = isAvailableFuture ? '#60745f' : 'rgba(77, 92, 72, 0.48)'
+      ctx.font = `${isAvailableFuture ? '600' : '400'} 17px "Songti SC", "STSong", serif`
+      ctx.fillText(isAvailableFuture ? '可申请' : '暂无安排', x + 10, y + 91)
     } else {
       const mainStyle = statusStyles[dayEvents[0]?.status ?? 'confirmed'] ?? statusStyles.confirmed
       ctx.fillStyle = mainStyle.text
-      ctx.font = '600 19px "Songti SC", "STSong", serif'
+      ctx.font = '600 17px "Songti SC", "STSong", serif'
       ctx.fillText(
-        dayEvents.length > 1 ? `${dayEvents.length} 段占用` : mainStyle.label,
-        tableX + tableWidth - 14,
-        y + 34,
+        dayEvents.length > 1 ? `${dayEvents.length} 项申请` : mainStyle.label,
+        x + 10,
+        y + 91,
       )
     }
     ctx.globalAlpha = 1
-
-    ctx.strokeStyle = 'rgba(93, 73, 48, 0.075)'
-    ctx.lineWidth = 1
-    ctx.beginPath()
-    ctx.moveTo(tableX, y + rowHeight)
-    ctx.lineTo(tableX + tableWidth, y + rowHeight)
-    ctx.stroke()
   })
 
-  const footerY = tableY + headerHeight + displayDates.length * rowHeight + 82
+  if (hoveredDateKey && hoveredDateKind === 'occupied') {
+    const hoveredIndex = rangeDates.indexOf(hoveredDateKey)
+    const hoveredEvents = selectedVenue.events.filter(
+      (event) => getEventDateKey(event.startAt) === hoveredDateKey,
+    )
+    if (hoveredIndex >= 0 && hoveredEvents.length) {
+      const hoveredCalendarIndex = leadingEmptyCells + hoveredIndex
+      const hoveredRowY = tableY
+        + headerHeight
+        + Math.floor(hoveredCalendarIndex / DETAIL_CALENDAR_COLUMNS) * rowHeight
+      drawVenueUsageHoverCard(ctx, hoveredDateKey, hoveredEvents, hoveredRowY, scrollY)
+    }
+  }
+
+  const footerY = tableY + headerHeight + calendarRows * rowHeight + 30
   ctx.textAlign = 'center'
   ctx.fillStyle = 'rgba(77, 60, 40, 0.45)'
   ctx.font = '22px "Songti SC", "STSong", serif'
-  ctx.fillText('列表顺序：今天 → 未来15天 → 过去15天', PAGE_WIDTH / 2, footerY)
+  ctx.fillText('悬浮有占用的日期查看详细时段 · 展示过去15天与未来15天', PAGE_WIDTH / 2, footerY)
+  ctx.restore()
+
+  const maxScroll = Math.max(0, contentHeight - PAGE_HEIGHT)
+  if (maxScroll <= 0) return
+  const progress = scrollY / maxScroll
+  ctx.fillStyle = 'rgba(93, 73, 48, 0.1)'
+  ctx.fillRect(PAGE_WIDTH - 70, 220, 3, 930)
+  ctx.fillStyle = 'rgba(93, 73, 48, 0.42)'
+  ctx.fillRect(PAGE_WIDTH - 72, 220 + progress * 850, 7, 80)
+}
+
+const PAGE_TAB_Y = 260
+const PAGE_TAB_WIDTH = 126
+const PAGE_TAB_HEIGHT = 42
+const PROFILE_TAB_X = 632
+const CALENDAR_TAB_X = 770
+
+function drawFolderPageTabs(ctx: CanvasRenderingContext2D, active: 'profile' | 'calendar') {
+  const tabs = [
+    { key: 'profile' as const, label: '个人首页', x: PROFILE_TAB_X },
+    { key: 'calendar' as const, label: '场地日历', x: CALENDAR_TAB_X },
+  ]
+  for (const tab of tabs) {
+    roundedRect(ctx, tab.x, PAGE_TAB_Y, PAGE_TAB_WIDTH, PAGE_TAB_HEIGHT, 13)
+    ctx.fillStyle = tab.key === active ? '#657760' : 'rgba(255, 252, 239, 0.34)'
+    ctx.fill()
+    ctx.strokeStyle = tab.key === active
+      ? 'rgba(72, 89, 68, 0.66)'
+      : 'rgba(92, 72, 47, 0.18)'
+    ctx.lineWidth = 2
+    ctx.stroke()
+    ctx.textAlign = 'center'
+    ctx.fillStyle = tab.key === active ? '#f7efd9' : 'rgba(77, 60, 40, 0.7)'
+    ctx.font = '600 20px "Songti SC", "STSong", serif'
+    ctx.fillText(tab.label, tab.x + PAGE_TAB_WIDTH / 2, PAGE_TAB_Y + 28)
+  }
+}
+
+const personalStatusStyles: Record<string, { label: string; color: string; text: string }> = {
+  draft: { label: '草稿', color: '#8b8477', text: '#5f594f' },
+  ai_reviewing: { label: 'AI审核中', color: '#77758a', text: '#535166' },
+  ai_passed: { label: 'AI通过', color: '#5f7a70', text: '#3f5b52' },
+  ai_rejected: { label: 'AI未通过', color: '#9a6152', text: '#743f34' },
+  rejected: { label: '未通过', color: '#9a6152', text: '#743f34' },
+  pending_signed_files: { label: '待签章材料', color: '#ad8248', text: '#765525' },
+  pending_signed: { label: '待签章材料', color: '#ad8248', text: '#765525' },
+  pending_admin_pre_review: { label: '等待人工初审', color: '#737583', text: '#515361' },
+  pending_admin: { label: '等待管理员', color: '#737583', text: '#515361' },
+  pending_admin_submit: { label: '等待提交', color: '#60745f', text: '#394c3b' },
+  supplement_required: { label: '需要补交', color: '#9a6152', text: '#743f34' },
+  admin_submitted: { label: '已提交', color: '#60745f', text: '#394c3b' },
+  completed: { label: '已完成', color: '#60745f', text: '#394c3b' },
+  cancelled: { label: '已取消', color: '#8b8477', text: '#5f594f' },
+}
+
+function formatCompactDate(dateValue: string | null) {
+  if (!dateValue) return '时间待确认'
+  const date = new Date(dateValue)
+  return `${date.getFullYear()}.${String(date.getMonth() + 1).padStart(2, '0')}.${String(date.getDate()).padStart(2, '0')}`
+}
+
+function getPersonalApplicationGroups(board: VenueUsageBoard) {
+  const applications = board.applications ?? []
+  return {
+    active: applications.filter(
+      (application) => !isHistoricalApplicationStatus(application.status),
+    ),
+    history: applications.filter(
+      (application) => isHistoricalApplicationStatus(application.status),
+    ),
+  }
+}
+
+function drawPersonalApplicationRow(
+  ctx: CanvasRenderingContext2D,
+  application: PersonalApplicationItem,
+  y: number,
+  compact = false,
+) {
+  const height = compact ? 76 : 96
+  roundedRect(ctx, 120, y, 784, height, 17)
+  ctx.fillStyle = application.status === 'supplement_required'
+    ? 'rgba(154, 97, 82, 0.09)'
+    : 'rgba(255, 252, 239, 0.22)'
+  ctx.fill()
+  ctx.strokeStyle = application.status === 'supplement_required'
+    ? 'rgba(154, 97, 82, 0.32)'
+    : 'rgba(92, 72, 47, 0.14)'
+  ctx.lineWidth = 2
+  ctx.stroke()
+
+  const style = personalStatusStyles[application.status]
+    ?? { label: application.status, color: '#8b8477', text: '#5f594f' }
+  ctx.textAlign = 'left'
+  ctx.fillStyle = '#58452f'
+  ctx.font = `600 ${compact ? 22 : 25}px "Songti SC", "STSong", serif`
+  ctx.fillText(application.venueName || '场地申请', 146, y + (compact ? 33 : 38))
+  ctx.fillStyle = 'rgba(77, 60, 40, 0.55)'
+  ctx.font = `${compact ? 17 : 19}px "Songti SC", "STSong", serif`
+  const purpose = application.purpose || '申请内容待补充'
+  ctx.fillText(
+    `${formatCompactDate(application.startAt || application.createdAt)} · ${purpose.length > 22 ? `${purpose.slice(0, 22)}…` : purpose}`,
+    146,
+    y + (compact ? 60 : 73),
+  )
+
+  if (application.status === 'supplement_required') {
+    roundedRect(ctx, 720, y + 24, 154, 50, 14)
+    ctx.fillStyle = '#93604f'
+    ctx.fill()
+    ctx.textAlign = 'center'
+    ctx.fillStyle = '#fbf2dc'
+    ctx.font = '600 19px "Songti SC", "STSong", serif'
+    ctx.fillText('补交材料  →', 797, y + 56)
+  } else {
+    ctx.fillStyle = style.color
+    roundedRect(ctx, 742, y + (compact ? 20 : 28), 132, 38, 12)
+    ctx.fill()
+    ctx.textAlign = 'center'
+    ctx.fillStyle = '#fff8e7'
+    ctx.font = '600 17px "Songti SC", "STSong", serif'
+    ctx.fillText(style.label, 808, y + (compact ? 45 : 53))
+  }
+}
+
+function drawPersonalHomeBoard(
+  ctx: CanvasRenderingContext2D,
+  board: VenueUsageBoard,
+  scrollY: number,
+  contentHeight: number,
+) {
+  ctx.clearRect(0, 0, PAGE_WIDTH, PAGE_HEIGHT)
+  ctx.save()
+  ctx.translate(0, -scrollY)
+  drawFolderPageTabs(ctx, 'profile')
+
+  ctx.textAlign = 'left'
+  ctx.fillStyle = 'rgba(89, 70, 47, 0.58)'
+  ctx.font = '600 20px "Palatino Linotype", Palatino, serif'
+  ctx.fillText('MEIYU  ·  PERSONAL DESK', 120, 240)
+  ctx.fillStyle = '#58452f'
+  ctx.font = '600 62px "Songti SC", "STSong", Georgia, serif'
+  ctx.fillText('我的首页', 120, 312)
+  ctx.fillStyle = 'rgba(77, 60, 40, 0.62)'
+  ctx.font = '25px "Songti SC", "STSong", serif'
+  ctx.fillText('个人信息、申请进度与历史记录', 120, 364)
+
+  ctx.strokeStyle = 'rgba(93, 73, 48, 0.25)'
+  ctx.lineWidth = 2
+  ctx.beginPath()
+  ctx.moveTo(120, 400)
+  ctx.lineTo(904, 400)
+  ctx.stroke()
+
+  if (board.state === 'loading') {
+    ctx.fillStyle = 'rgba(77, 60, 40, 0.6)'
+    ctx.font = '30px "Songti SC", "STSong", serif'
+    ctx.fillText('正在整理您的个人档案与申请记录…', 120, 480)
+    ctx.restore()
+    return
+  }
+  if (board.state === 'error' || !board.profile) {
+    ctx.fillStyle = '#8b5548'
+    ctx.font = '30px "Songti SC", "STSong", serif'
+    ctx.fillText('个人信息暂时无法读取', 120, 470)
+    ctx.fillStyle = 'rgba(77, 60, 40, 0.58)'
+    ctx.font = '23px "Songti SC", "STSong", serif'
+    ctx.fillText(board.error || '请稍后重试', 120, 516)
+    ctx.restore()
+    return
+  }
+
+  const profile = board.profile
+  const groups = getPersonalApplicationGroups(board)
+  const supplementCount = (board.applications ?? []).filter(
+    (application) => application.status === 'supplement_required',
+  ).length
+  roundedRect(ctx, 120, 430, 784, 132, 22)
+  ctx.fillStyle = 'rgba(255, 252, 239, 0.26)'
+  ctx.fill()
+  ctx.strokeStyle = 'rgba(92, 72, 47, 0.16)'
+  ctx.stroke()
+  ctx.fillStyle = '#657760'
+  ctx.beginPath()
+  ctx.arc(176, 496, 34, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.textAlign = 'center'
+  ctx.fillStyle = '#f8efd8'
+  ctx.font = '600 28px Georgia, serif'
+  ctx.fillText(profile.email.slice(0, 1).toUpperCase(), 176, 506)
+  ctx.textAlign = 'left'
+  ctx.fillStyle = '#58452f'
+  ctx.font = '600 28px "Songti SC", "STSong", serif'
+  ctx.fillText(profile.email, 230, 482)
+  ctx.fillStyle = 'rgba(77, 60, 40, 0.58)'
+  ctx.font = '21px "Songti SC", "STSong", serif'
+  ctx.fillText(profile.organization || '未填写所属组织', 230, 519)
+  ctx.textAlign = 'right'
+  ctx.fillStyle = profile.verified ? '#50684f' : '#8b6548'
+  ctx.font = '600 20px "Songti SC", "STSong", serif'
+  ctx.fillText(profile.verified ? '手机身份已认证' : '身份待认证', 872, 487)
+  ctx.fillStyle = 'rgba(77, 60, 40, 0.5)'
+  ctx.font = '18px "Songti SC", "STSong", serif'
+  ctx.fillText(profile.applicationAllowed ? '具有场地申请权限' : '申请权限待开通', 872, 521)
+
+  drawStat(ctx, 120, board.applications?.length ?? 0, '全部申请', 590)
+  drawStat(ctx, 393, groups.active.length, '进行中', 590)
+  drawStat(ctx, 666, supplementCount, '待补交', 590)
+
+  let cursorY = 760
+  ctx.textAlign = 'left'
+  ctx.fillStyle = '#58452f'
+  ctx.font = '600 31px "Songti SC", "STSong", serif'
+  ctx.fillText('当前申请', 120, cursorY)
+  cursorY += 28
+  if (!groups.active.length) {
+    ctx.fillStyle = 'rgba(77, 60, 40, 0.5)'
+    ctx.font = '23px "Songti SC", "STSong", serif'
+    ctx.fillText('暂无进行中的申请，可前往场地日历发起申请。', 120, cursorY + 45)
+    cursorY += 94
+  } else {
+    for (const application of groups.active) {
+      drawPersonalApplicationRow(ctx, application, cursorY)
+      cursorY += 112
+    }
+  }
+
+  cursorY += 30
+  ctx.textAlign = 'left'
+  ctx.fillStyle = '#58452f'
+  ctx.font = '600 31px "Songti SC", "STSong", serif'
+  ctx.fillText('历史申请', 120, cursorY)
+  cursorY += 28
+  if (!groups.history.length) {
+    ctx.fillStyle = 'rgba(77, 60, 40, 0.5)'
+    ctx.font = '23px "Songti SC", "STSong", serif'
+    ctx.fillText('完成或取消的申请会保存在这里。', 120, cursorY + 45)
+  } else {
+    for (const application of groups.history) {
+      drawPersonalApplicationRow(ctx, application, cursorY, true)
+      cursorY += 92
+    }
+  }
   ctx.restore()
 
   const maxScroll = Math.max(0, contentHeight - PAGE_HEIGHT)
@@ -660,37 +1094,60 @@ function drawParchment(
   scrollY: number,
   contentHeight: number,
   selectedVenueId: number | null,
+  hoveredDateKey: string | null,
+  hoveredDateKind: 'occupied' | 'available' | null,
 ) {
+  if (board.mode === 'profile') {
+    drawPersonalHomeBoard(ctx, board, scrollY, contentHeight)
+    return
+  }
   if (board.mode === 'user-detail') {
-    drawUserVenueDetailBoard(ctx, board, selectedVenueId, scrollY, contentHeight)
+    drawUserVenueDetailBoard(
+      ctx,
+      board,
+      selectedVenueId,
+      scrollY,
+      contentHeight,
+      hoveredDateKey,
+      hoveredDateKind,
+    )
+    ctx.save()
+    ctx.translate(0, -scrollY)
+    drawFolderPageTabs(ctx, 'calendar')
+    ctx.restore()
     return
   }
   if (board.mode === 'user-matrix') {
     drawUserRangeBoard(ctx, board, scrollY, contentHeight)
+    ctx.save()
+    ctx.translate(0, -scrollY)
+    drawFolderPageTabs(ctx, 'calendar')
+    ctx.restore()
     return
   }
   ctx.clearRect(0, 0, PAGE_WIDTH, PAGE_HEIGHT)
   ctx.save()
   ctx.translate(0, -scrollY)
+  drawFolderPageTabs(ctx, 'calendar')
 
   ctx.textAlign = 'left'
   ctx.fillStyle = 'rgba(89, 70, 47, 0.58)'
   ctx.font = '600 20px "Palatino Linotype", Palatino, serif'
-  ctx.fillText('MEIYU  ·  VENUE BOARD', 120, 208)
+  ctx.fillText('MEIYU  ·  VENUE BOARD', 120, 240)
 
   ctx.fillStyle = '#58452f'
   ctx.font = '600 70px "Songti SC", "STSong", Georgia, serif'
-  ctx.fillText('场地使用一览', 120, 300)
+  ctx.fillText('场地使用一览', 120, 312)
 
   ctx.fillStyle = 'rgba(77, 60, 40, 0.62)'
   ctx.font = '27px "Songti SC", "STSong", serif'
-  ctx.fillText(formatDate(board.date), 120, 354)
+  ctx.fillText(formatDate(board.date), 120, 364)
 
   ctx.strokeStyle = 'rgba(93, 73, 48, 0.25)'
   ctx.lineWidth = 2
   ctx.beginPath()
-  ctx.moveTo(120, 392)
-  ctx.lineTo(904, 392)
+  ctx.moveTo(120, 400)
+  ctx.lineTo(904, 400)
   ctx.stroke()
 
   if (board.state === 'loading') {
@@ -770,6 +1227,9 @@ export function createParchmentPageCanvas(maxAnisotropy: number): ParchmentPageC
   let currentScroll = 0
   let targetScroll = 0
   let selectedVenueId: number | null = null
+  let hoveredDateKey: string | null = null
+  let hoveredDateKind: 'occupied' | 'available' | null = null
+  let pendingBoard: VenueUsageBoard | null = null
   let pendingVenueId: number | null = null
   let fadePhase: 'idle' | 'out' | 'in' = 'idle'
   let fadeOpacity = 1
@@ -783,7 +1243,15 @@ export function createParchmentPageCanvas(maxAnisotropy: number): ParchmentPageC
   texture.magFilter = THREE.LinearFilter
 
   const render = () => {
-    drawParchment(context, board, currentScroll, contentHeight, selectedVenueId)
+    drawParchment(
+      context,
+      board,
+      currentScroll,
+      contentHeight,
+      selectedVenueId,
+      hoveredDateKey,
+      hoveredDateKind,
+    )
     if (fadeOpacity < 0.999) {
       context.save()
       context.globalCompositeOperation = 'destination-in'
@@ -800,7 +1268,10 @@ export function createParchmentPageCanvas(maxAnisotropy: number): ParchmentPageC
     if (!board.venues.some((venue) => venue.id === selectedVenueId)) {
       selectedVenueId = board.venues[0]?.id ?? null
     }
+    pendingBoard = null
     pendingVenueId = null
+    hoveredDateKey = null
+    hoveredDateKind = null
     fadePhase = 'idle'
     fadeOpacity = 1
     currentScroll = 0
@@ -808,8 +1279,19 @@ export function createParchmentPageCanvas(maxAnisotropy: number): ParchmentPageC
     render()
   }
 
+  const transitionUsageBoard = (nextBoard: VenueUsageBoard) => {
+    pendingBoard = nextBoard
+    pendingVenueId = null
+    hoveredDateKey = null
+    hoveredDateKind = null
+    fadePhase = 'out'
+  }
+
   const selectVenue = (venueId: number) => {
     if (venueId === selectedVenueId || !board.venues.some((venue) => venue.id === venueId)) return
+    hoveredDateKey = null
+    hoveredDateKind = null
+    pendingBoard = null
     pendingVenueId = venueId
     fadePhase = 'out'
   }
@@ -817,6 +1299,129 @@ export function createParchmentPageCanvas(maxAnisotropy: number): ParchmentPageC
   const scrollBy = (delta: number) => {
     const maxScroll = Math.max(0, contentHeight - PAGE_HEIGHT)
     targetScroll = THREE.MathUtils.clamp(targetScroll + delta, 0, maxScroll)
+    if (hoveredDateKey) {
+      hoveredDateKey = null
+      hoveredDateKind = null
+      render()
+    }
+  }
+
+  const clearHover = () => {
+    if (!hoveredDateKey) return
+    hoveredDateKey = null
+    hoveredDateKind = null
+    render()
+  }
+
+  const getCalendarPointerTarget = (normalizedX: number, normalizedY: number) => {
+    const canvasX = normalizedX * PAGE_WIDTH
+    const canvasY = normalizedY * PAGE_HEIGHT
+    const selectedVenue =
+      board.venues.find((venue) => venue.id === selectedVenueId) ?? board.venues[0]
+    const contentY = canvasY + currentScroll
+    const bodyTop = DETAIL_TABLE_Y + DETAIL_HEADER_HEIGHT
+    const rangeDates = getDateRange(board.rangeStart || board.date, board.rangeEnd || board.date)
+    const firstRangeDate = new Date(`${rangeDates[0] ?? board.date}T12:00:00`)
+    const leadingEmptyCells = (firstRangeDate.getDay() + 6) % 7
+    const calendarRows = Math.ceil(
+      (leadingEmptyCells + rangeDates.length) / DETAIL_CALENDAR_COLUMNS,
+    )
+    const bodyBottom = bodyTop + calendarRows * DETAIL_ROW_HEIGHT
+
+    if (
+      board.mode !== 'user-detail'
+      || board.state !== 'ready'
+      || !selectedVenue
+      || canvasX < DETAIL_TABLE_X
+      || canvasX > DETAIL_TABLE_X + DETAIL_TABLE_WIDTH
+      || contentY < bodyTop
+      || contentY >= bodyBottom
+    ) {
+      clearHover()
+      return null
+    }
+
+    const columnIndex = Math.min(
+      DETAIL_CALENDAR_COLUMNS - 1,
+      Math.floor((canvasX - DETAIL_TABLE_X) / DETAIL_CELL_WIDTH),
+    )
+    const rowIndex = Math.floor((contentY - bodyTop) / DETAIL_ROW_HEIGHT)
+    const calendarIndex = rowIndex * DETAIL_CALENDAR_COLUMNS + columnIndex
+    const dateKey = rangeDates[calendarIndex - leadingEmptyCells]
+    if (!dateKey) {
+      clearHover()
+      return null
+    }
+
+    const dayEvents = selectedVenue.events.filter(
+      (event) => getEventDateKey(event.startAt) === dateKey,
+    )
+    if (dayEvents.length > 0) {
+      return { date: dateKey, kind: 'occupied' as const, venue: selectedVenue }
+    }
+    if (dateKey > board.date) {
+      return { date: dateKey, kind: 'available' as const, venue: selectedVenue }
+    }
+    return null
+  }
+
+  const pointerMove = (normalizedX: number, normalizedY: number) => {
+    const target = getCalendarPointerTarget(normalizedX, normalizedY)
+    const nextHoveredDateKey = target?.date ?? null
+    const nextHoveredDateKind = target?.kind ?? null
+    if (
+      nextHoveredDateKey !== hoveredDateKey
+      || nextHoveredDateKind !== hoveredDateKind
+    ) {
+      hoveredDateKey = nextHoveredDateKey
+      hoveredDateKind = nextHoveredDateKind
+      render()
+    }
+  }
+
+  const getApplicationTarget = (normalizedX: number, normalizedY: number) => {
+    const target = getCalendarPointerTarget(normalizedX, normalizedY)
+    if (!target || target.kind !== 'available') return null
+    return {
+      venueId: target.venue.id,
+      venueName: target.venue.name,
+      date: target.date,
+    }
+  }
+
+  const getPageAction = (
+    normalizedX: number,
+    normalizedY: number,
+  ): ParchmentPageAction | null => {
+    if (fadePhase !== 'idle') return null
+    const canvasX = normalizedX * PAGE_WIDTH
+    const contentY = normalizedY * PAGE_HEIGHT + currentScroll
+    if (contentY >= PAGE_TAB_Y && contentY <= PAGE_TAB_Y + PAGE_TAB_HEIGHT) {
+      if (canvasX >= PROFILE_TAB_X && canvasX <= PROFILE_TAB_X + PAGE_TAB_WIDTH) {
+        return { type: 'switch-page', page: 'profile' }
+      }
+      if (canvasX >= CALENDAR_TAB_X && canvasX <= CALENDAR_TAB_X + PAGE_TAB_WIDTH) {
+        return { type: 'switch-page', page: 'calendar' }
+      }
+    }
+    if (board.mode !== 'profile' || board.state !== 'ready') return null
+
+    const { active } = getPersonalApplicationGroups(board)
+    const firstRowY = 788
+    for (let index = 0; index < active.length; index += 1) {
+      const application = active[index]
+      const rowY = firstRowY + index * 112
+      if (
+        application?.status === 'supplement_required'
+        && canvasX >= 120
+        && canvasX <= 904
+        && contentY >= rowY
+        && contentY <= rowY + 96
+      ) {
+        return { type: 'supplement', application }
+      }
+    }
+    return null
   }
 
   const tick = () => {
@@ -829,8 +1434,17 @@ export function createParchmentPageCanvas(maxAnisotropy: number): ParchmentPageC
       fadeOpacity = Math.max(0, fadeOpacity - deltaSeconds / 0.22)
       needsRender = true
       if (fadeOpacity <= 0) {
-        selectedVenueId = pendingVenueId
-        pendingVenueId = null
+        if (pendingBoard) {
+          board = pendingBoard
+          pendingBoard = null
+          contentHeight = calculateContentHeight(board)
+          if (!board.venues.some((venue) => venue.id === selectedVenueId)) {
+            selectedVenueId = board.venues[0]?.id ?? null
+          }
+        } else {
+          selectedVenueId = pendingVenueId
+          pendingVenueId = null
+        }
         currentScroll = 0
         targetScroll = 0
         fadePhase = 'in'
@@ -855,5 +1469,16 @@ export function createParchmentPageCanvas(maxAnisotropy: number): ParchmentPageC
   }
 
   render()
-  return { texture, updateUsageBoard, selectVenue, scrollBy, tick }
+  return {
+    texture,
+    updateUsageBoard,
+    transitionUsageBoard,
+    selectVenue,
+    scrollBy,
+    pointerMove,
+    getApplicationTarget,
+    getPageAction,
+    pointerLeave: clearHover,
+    tick,
+  }
 }

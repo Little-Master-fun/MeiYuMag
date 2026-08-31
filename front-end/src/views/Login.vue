@@ -21,6 +21,7 @@ import {
 import { useAuthStore } from '@/stores/auth'
 import {
   createParchmentPageCanvas,
+  type PersonalApplicationItem,
   type ParchmentPageCanvas,
   type VenueUsageBoard,
   type VenueUsageItem,
@@ -29,12 +30,17 @@ import {
   enablePageTurnDeformation,
   type PageTurnShaderUniforms,
 } from '@/assets/shaders/pageTurn'
-import { projectPageContentOntoMaterial } from '@/assets/shaders/pageContent'
+import {
+  projectPageContentOntoMaterial,
+  type PageContentBounds,
+} from '@/assets/shaders/pageContent'
 import { enableTreeCrownWind, type WindShaderUniforms } from '@/assets/shaders/treeWind'
 
 const viewport = ref<HTMLDivElement | null>(null)
 const venueSelector = ref<HTMLElement | null>(null)
+const applicationTab = ref<HTMLButtonElement | null>(null)
 const authFormStage = ref<HTMLDivElement | null>(null)
+const applicationFileInput = ref<HTMLInputElement | null>(null)
 const loadingProgress = ref(0)
 const loadError = ref('')
 const modelReady = ref(false)
@@ -64,6 +70,12 @@ const pageTurnAvailable = ref(false)
 const pageTurning = ref(false)
 const pageTurnCompleted = ref(false)
 const pageTurnEnabled = false
+const applicationStageActive = ref(false)
+const folderPage = ref<'profile' | 'calendar'>('profile')
+const submissionNoticeVisible = ref(false)
+const submissionNoticeMessage = ref('')
+const submissionNoticeMode = ref<'uploading' | 'success' | 'error'>('uploading')
+const applicationTabLoading = ref(false)
 
 const auth = useAuthStore()
 
@@ -92,6 +104,17 @@ interface VenueUsageRangeApi {
   }>
 }
 
+interface PersonalApplicationApi {
+  id: number
+  application_type: string
+  venue_id: number | null
+  purpose_summary: string | null
+  status: string
+  start_at: string | null
+  end_at: string | null
+  created_at: string
+}
+
 const venueOptions = ref<VenueApiItem[]>([])
 const selectedVenueId = ref<number | null>(null)
 const venueSelectorReady = ref(false)
@@ -103,15 +126,19 @@ let controls: OrbitControls | null = null
 let model: THREE.Object3D | null = null
 let houseModel: THREE.Object3D | null = null
 let clipboardModel: THREE.Object3D | null = null
+let mailboxModel: THREE.Object3D | null = null
 let resizeObserver: ResizeObserver | null = null
 let animationFrame = 0
 let smsCountdownTimer: ReturnType<typeof setInterval> | null = null
 let topPage: THREE.Mesh | null = null
 let paperSurfaceMesh: THREE.Mesh | null = null
+let paperContentBounds: PageContentBounds | null = null
 let paperVisibleFacePoints: THREE.Vector3[] = []
 let paperVisibleFaceZ = 0
 let pageTurnShader: PageTurnShaderUniforms | null = null
 let pageContentCanvas: ParchmentPageCanvas | null = null
+let personalHomeBoard: VenueUsageBoard | null = null
+let venueUsageBoard: VenueUsageBoard | null = null
 let pageTurnTimeline: gsap.core.Timeline | null = null
 const pageRaycaster = new THREE.Raycaster()
 const pagePointer = new THREE.Vector2()
@@ -153,6 +180,45 @@ interface PostLoginFlight {
   startedAt: number
 }
 
+interface ApplicationNavigationTarget {
+  venueId: number
+  venueName: string
+  date: string
+  mode?: 'new' | 'supplement'
+  applicationId?: number
+}
+
+interface ApplicationFlight {
+  startPosition: THREE.Vector3
+  endPosition: THREE.Vector3
+  startTarget: THREE.Vector3
+  endTarget: THREE.Vector3
+  currentTarget: THREE.Vector3
+  startClipboardPosition: THREE.Vector3
+  endClipboardPosition: THREE.Vector3
+  startClipboardQuaternion: THREE.Quaternion
+  endClipboardQuaternion: THREE.Quaternion
+  startClipboardScale: number
+  endClipboardScale: number
+  cameraDelay: number
+  cameraDuration: number
+  clipboardDelay: number
+  clipboardDuration: number
+  totalDuration: number
+  envelopeStarted: boolean
+  startedAt: number
+}
+
+type SubmissionEnvelopeState = 'hidden' | 'ready' | 'drag' | 'uploading' | 'success' | 'error'
+
+interface SubmissionEnvelopeVisual {
+  object: THREE.Object3D
+  homeParent: THREE.Object3D
+  homePosition: THREE.Vector3
+  homeQuaternion: THREE.Quaternion
+  homeScale: THREE.Vector3
+}
+
 interface PushedTreeAnimation {
   pivot: THREE.Group
   baseQuaternion: THREE.Quaternion
@@ -169,6 +235,15 @@ interface PushedTreeAnimation {
 
 let cameraFlight: CameraFlight | null = null
 let postLoginFlight: PostLoginFlight | null = null
+let applicationFlight: ApplicationFlight | null = null
+let selectedApplicationTarget: ApplicationNavigationTarget | null = null
+let submissionEnvelope: SubmissionEnvelopeVisual | null = null
+let submissionEnvelopeState: SubmissionEnvelopeState = 'hidden'
+let submissionEnvelopeTween: gsap.core.Timeline | null = null
+let submissionEnvelopeReturnTimer: ReturnType<typeof setTimeout> | null = null
+let submissionNoticeTimer: ReturnType<typeof setTimeout> | null = null
+let submissionEnvelopeFileName = ''
+let submissionEnvelopeMessage = ''
 let pushedTreeAnimation: PushedTreeAnimation | null = null
 let startCameraTarget: THREE.Vector3 | null = null
 let endCameraTarget: THREE.Vector3 | null = null
@@ -211,7 +286,7 @@ const cameraActions = {
   printCurrent: () => printCurrentCameraParameters(),
 }
 
-const clipboardDebug = {
+const clipboardHomeTransform = {
   x: -0.05,
   y: 0.086,
   z: 0.02,
@@ -220,6 +295,8 @@ const clipboardDebug = {
   rotationZ: 0,
   scale: 0.01,
 }
+
+const clipboardDebug = { ...clipboardHomeTransform }
 
 const clipboardActions = {
   printCurrent: () => printClipboardParameters(),
@@ -239,8 +316,77 @@ const houseDebug = {
   scale: 3,
 }
 
+const mailboxDebug = {
+  x: -0.14,
+  y: 0.03,
+  z: 0.016,
+  rotationX: 0,
+  rotationY: 90,
+  rotationZ: 0,
+  scale: 0.054,
+}
+
+const mailboxActions = {
+  focus: () => focusMailbox(),
+  printCurrent: () => printMailboxParameters(),
+}
+
+const venueTabDebug = {
+  leftX: 5,
+  leftY: 0,
+  rightX: -5,
+  rightY: 0,
+  left1Y: 0,
+  left2Y: 0,
+  left3Y: 0,
+  left4Y: 0,
+  left5Y: 0,
+  right1Y: 0,
+  right2Y: 0,
+  right3Y: 0,
+  right4Y: 0,
+}
+
+const venueTabActions = {
+  printCurrent: () => printVenueTabParameters(),
+}
+
 const postLoginMotionDebug = {
   overlapDuration: 1.2,
+}
+
+const applicationMotionDebug = {
+  cameraDelay: 0.2,
+  cameraDuration: 1.9,
+  clipboardDelay: 0.1,
+  clipboardDuration: 1.25,
+}
+
+const applicationMotionActions = {
+  replay: () => replayApplicationCamera(),
+}
+
+const submissionEnvelopeDebug = {
+  x: -0.012,
+  y: 0,
+  z: -0.039,
+  rotationX: 137,
+  rotationY: 0,
+  rotationZ: -180,
+  scale: 0.02,
+  flyDuration: 0.9,
+  returnDuration: 0.9,
+  successHold: 1.05,
+  startAdvance: 0.6,
+}
+
+const submissionEnvelopeActions = {
+  previewOut: () => {
+    resetSubmissionEnvelope()
+    showSubmissionEnvelope()
+  },
+  previewReturn: () => hideSubmissionEnvelope(),
+  printCurrent: () => printSubmissionEnvelopeParameters(),
 }
 
 const pushedTreeDebug = {
@@ -363,6 +509,346 @@ function fixCutoutMaterial(material: THREE.Material) {
   material.side = THREE.DoubleSide
   material.alphaToCoverage = true
   material.needsUpdate = true
+}
+
+function fixMailboxMaterial(material: THREE.Material) {
+  // The mailbox is exported as one BLEND material even though most of its
+  // texture is fully opaque. Rendering the complete mesh in Three.js'
+  // transparent pass disables reliable self-occlusion, so the rear geometry
+  // can show through the wooden panels. Use an alpha cutout instead: this
+  // keeps the leaves/vines cut out while returning the wood to the opaque,
+  // depth-writing pass.
+  material.transparent = false
+  material.opacity = 1
+  material.alphaTest = 0.42
+  material.depthTest = true
+  material.depthWrite = true
+  material.side = THREE.DoubleSide
+  material.alphaToCoverage = true
+  material.needsUpdate = true
+}
+
+function setSubmissionEnvelopeState(
+  state: SubmissionEnvelopeState,
+  message = '',
+  fileName = '',
+) {
+  submissionEnvelopeState = state
+  submissionEnvelopeMessage = message
+  submissionEnvelopeFileName = fileName
+}
+
+function clearSubmissionNotice() {
+  if (submissionNoticeTimer) {
+    clearTimeout(submissionNoticeTimer)
+    submissionNoticeTimer = null
+  }
+  submissionNoticeVisible.value = false
+}
+
+function showSubmissionNotice(
+  mode: 'uploading' | 'success' | 'error',
+  message: string,
+  duration = 0,
+) {
+  clearSubmissionNotice()
+  submissionNoticeMode.value = mode
+  submissionNoticeMessage.value = message
+  submissionNoticeVisible.value = true
+  if (duration <= 0) return
+  submissionNoticeTimer = setTimeout(() => {
+    submissionNoticeTimer = null
+    submissionNoticeVisible.value = false
+  }, duration)
+}
+
+function registerSubmissionEnvelope(root: THREE.Object3D) {
+  const object = root.getObjectByName('Submission_Envelope')
+  if (!object?.parent) {
+    console.warn('[3D 信封] mailbox.glb 中未找到 Submission_Envelope 节点')
+    return null
+  }
+  object.traverse((child) => {
+    if (!(child instanceof THREE.Mesh)) return
+    child.castShadow = true
+    child.receiveShadow = true
+  })
+  submissionEnvelope = {
+    object,
+    homeParent: object.parent,
+    homePosition: object.position.clone(),
+    homeQuaternion: object.quaternion.clone(),
+    homeScale: object.scale.clone(),
+  }
+  setSubmissionEnvelopeState('hidden')
+  return submissionEnvelope
+}
+
+function getSubmissionEnvelopeTargetQuaternion() {
+  return new THREE.Quaternion().setFromEuler(new THREE.Euler(
+    THREE.MathUtils.degToRad(submissionEnvelopeDebug.rotationX),
+    THREE.MathUtils.degToRad(submissionEnvelopeDebug.rotationY),
+    THREE.MathUtils.degToRad(submissionEnvelopeDebug.rotationZ),
+  ))
+}
+
+function applySubmissionEnvelopeDebugTransform() {
+  if (
+    !submissionEnvelope
+    || !camera
+    || submissionEnvelopeState === 'hidden'
+    || submissionEnvelope.object.parent !== camera
+  ) return
+  submissionEnvelope.object.position.set(
+    submissionEnvelopeDebug.x,
+    submissionEnvelopeDebug.y,
+    submissionEnvelopeDebug.z,
+  )
+  submissionEnvelope.object.quaternion.copy(getSubmissionEnvelopeTargetQuaternion())
+  submissionEnvelope.object.scale.setScalar(submissionEnvelopeDebug.scale)
+}
+
+function printSubmissionEnvelopeParameters() {
+  console.info('[3D 信封动画] 当前参数', { ...submissionEnvelopeDebug })
+}
+
+function resetSubmissionEnvelope() {
+  submissionEnvelopeTween?.kill()
+  submissionEnvelopeTween = null
+  if (submissionEnvelopeReturnTimer) {
+    clearTimeout(submissionEnvelopeReturnTimer)
+    submissionEnvelopeReturnTimer = null
+  }
+  if (!submissionEnvelope) return
+  const { object, homeParent, homePosition, homeQuaternion, homeScale } = submissionEnvelope
+  homeParent.add(object)
+  object.position.copy(homePosition)
+  object.quaternion.copy(homeQuaternion)
+  object.scale.copy(homeScale)
+  object.visible = true
+  setSubmissionEnvelopeState('hidden')
+}
+
+function showSubmissionEnvelope() {
+  if (!submissionEnvelope || !camera) return
+  submissionEnvelopeTween?.kill()
+  if (submissionEnvelopeReturnTimer) {
+    clearTimeout(submissionEnvelopeReturnTimer)
+    submissionEnvelopeReturnTimer = null
+  }
+  const { object } = submissionEnvelope
+  const targetQuaternion = getSubmissionEnvelopeTargetQuaternion()
+  const flyDuration = THREE.MathUtils.clamp(submissionEnvelopeDebug.flyDuration, 0.15, 4)
+  camera.updateMatrixWorld(true)
+  object.updateMatrixWorld(true)
+  camera.attach(object)
+  setSubmissionEnvelopeState('ready')
+  object.visible = true
+  submissionEnvelopeTween = gsap
+    .timeline()
+    .to(object.position, {
+      x: submissionEnvelopeDebug.x,
+      y: submissionEnvelopeDebug.y,
+      z: submissionEnvelopeDebug.z,
+      duration: flyDuration,
+      ease: 'power3.out',
+    }, 0)
+    .to(object.quaternion, {
+      x: targetQuaternion.x,
+      y: targetQuaternion.y,
+      z: targetQuaternion.z,
+      w: targetQuaternion.w,
+      duration: flyDuration,
+      ease: 'power3.out',
+    }, 0)
+    .to(object.scale, {
+      x: submissionEnvelopeDebug.scale,
+      y: submissionEnvelopeDebug.scale,
+      z: submissionEnvelopeDebug.scale,
+      duration: flyDuration,
+      ease: 'power3.out',
+    }, 0)
+}
+
+function hideSubmissionEnvelope(onReturned?: () => void) {
+  if (!submissionEnvelope || !camera || submissionEnvelopeState === 'hidden') return
+  submissionEnvelopeTween?.kill()
+  const { object, homeParent, homePosition, homeQuaternion, homeScale } = submissionEnvelope
+  camera.updateMatrixWorld(true)
+  homeParent.updateMatrixWorld(true)
+  const homeWorldMatrix = new THREE.Matrix4().multiplyMatrices(
+    homeParent.matrixWorld,
+    new THREE.Matrix4().compose(homePosition, homeQuaternion, homeScale),
+  )
+  const cameraLocalMatrix = new THREE.Matrix4().multiplyMatrices(
+    camera.matrixWorldInverse,
+    homeWorldMatrix,
+  )
+  const returnPosition = new THREE.Vector3()
+  const returnQuaternion = new THREE.Quaternion()
+  const returnScale = new THREE.Vector3()
+  cameraLocalMatrix.decompose(returnPosition, returnQuaternion, returnScale)
+  const returnDuration = THREE.MathUtils.clamp(submissionEnvelopeDebug.returnDuration, 0.15, 4)
+  submissionEnvelopeTween = gsap
+    .timeline({
+      onComplete: () => {
+        if (!submissionEnvelope) return
+        homeParent.add(object)
+        object.position.copy(homePosition)
+        object.quaternion.copy(homeQuaternion)
+        object.scale.copy(homeScale)
+        setSubmissionEnvelopeState('hidden')
+        onReturned?.()
+      },
+    })
+    .to(object.position, {
+      x: returnPosition.x,
+      y: returnPosition.y,
+      z: returnPosition.z,
+      duration: returnDuration,
+      ease: 'power2.in',
+    }, 0)
+    .to(object.quaternion, {
+      x: returnQuaternion.x,
+      y: returnQuaternion.y,
+      z: returnQuaternion.z,
+      w: returnQuaternion.w,
+      duration: returnDuration,
+      ease: 'power2.in',
+    }, 0)
+    .to(object.scale, {
+      x: returnScale.x,
+      y: returnScale.y,
+      z: returnScale.z,
+      duration: returnDuration,
+      ease: 'power2.in',
+    }, 0)
+}
+
+function isPointerOverSubmissionEnvelope(clientX: number, clientY: number) {
+  if (
+    !submissionEnvelope?.object.visible
+    || !renderer
+    || !camera
+    || submissionEnvelopeState === 'hidden'
+  ) return false
+  const bounds = renderer.domElement.getBoundingClientRect()
+  if (!bounds.width || !bounds.height) return false
+  pagePointer.set(
+    ((clientX - bounds.left) / bounds.width) * 2 - 1,
+    -((clientY - bounds.top) / bounds.height) * 2 + 1,
+  )
+  pageRaycaster.setFromCamera(pagePointer, camera)
+  return pageRaycaster.intersectObject(submissionEnvelope.object, true).length > 0
+}
+
+function openSubmissionFilePicker() {
+  if (!['ready', 'drag', 'error'].includes(submissionEnvelopeState)) return
+  applicationFileInput.value?.click()
+}
+
+function getSubmissionErrorMessage(error: unknown) {
+  if (!axios.isAxiosError(error)) return '文件提交失败，请稍后重试'
+  const detail = error.response?.data?.detail
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => (typeof item?.msg === 'string' ? item.msg : ''))
+      .filter(Boolean)
+    if (messages.length) return messages.join('；')
+  }
+  return error.message || '文件提交失败，请稍后重试'
+}
+
+async function submitApplicationFile(file: File) {
+  const target = selectedApplicationTarget
+  if (
+    !target
+    || submissionEnvelopeState === 'uploading'
+    || (target.mode !== 'supplement' && target.venueId <= 0)
+  ) return
+  if (!file.name.toLowerCase().endsWith('.docx')) {
+    const message = '目前仅支持 .docx Word 申请材料'
+    setSubmissionEnvelopeState('error', message, file.name)
+    showSubmissionNotice('error', message, 3800)
+    return
+  }
+  if (file.size > 30 * 1024 * 1024) {
+    const message = '文件不能超过 30MB'
+    setSubmissionEnvelopeState('error', message, file.name)
+    showSubmissionNotice('error', message, 3800)
+    return
+  }
+
+  setSubmissionEnvelopeState('uploading', '正在进行材料初审，请稍候', file.name)
+  showSubmissionNotice(
+    'uploading',
+    target.mode === 'supplement'
+      ? `正在上传补交材料“${file.name}”`
+      : `正在上传“${file.name}”并进行材料初审`,
+  )
+  const formData = new FormData()
+  formData.append('file', file)
+
+  try {
+    let successMessage = '文件已送达，等待管理员初审'
+    if (target.mode === 'supplement' && target.applicationId) {
+      formData.append('file_type', 'supplement_file')
+      await axios.post(`/api/v1/applications/${target.applicationId}/files`, formData)
+      successMessage = '补交材料已送达，申请重新进入审核流程'
+    } else {
+      formData.append(
+        'application_type',
+        target.venueName.includes('悦园三楼') ? 'yueyuan_third_floor' : 'meiyu_venue',
+      )
+      formData.append('venue_id', String(target.venueId))
+      const { data } = await axios.post('/api/v1/applications/pre-review', formData)
+      successMessage = data?.passed ? '初审通过，申请已预占用' : successMessage
+    }
+    setSubmissionEnvelopeState('success', successMessage, file.name)
+    showSubmissionNotice('success', successMessage, 3800)
+    void loadPersonalHome()
+    void loadVenueUsageBoard()
+    submissionEnvelopeReturnTimer = setTimeout(() => {
+      submissionEnvelopeReturnTimer = null
+      hideSubmissionEnvelope(() => playPostLoginCamera())
+    }, Math.max(submissionEnvelopeDebug.successHold, 0) * 1000)
+  } catch (error) {
+    const message = getSubmissionErrorMessage(error)
+    setSubmissionEnvelopeState('error', message, file.name)
+    showSubmissionNotice('error', message, 3800)
+  }
+}
+
+function handleApplicationFileChange(event: Event) {
+  const input = event.currentTarget as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (file) void submitApplicationFile(file)
+}
+
+function handleSubmissionDragOver(event: DragEvent) {
+  if (!isPointerOverSubmissionEnvelope(event.clientX, event.clientY)) {
+    if (submissionEnvelopeState === 'drag') setSubmissionEnvelopeState('ready')
+    return
+  }
+  event.preventDefault()
+  if (submissionEnvelopeState === 'ready' || submissionEnvelopeState === 'error') {
+    setSubmissionEnvelopeState('drag', '松开即可递交 Word 申请材料')
+  }
+}
+
+function handleSubmissionDragLeave(event: DragEvent) {
+  if (isPointerOverSubmissionEnvelope(event.clientX, event.clientY)) return
+  if (submissionEnvelopeState === 'drag') setSubmissionEnvelopeState('ready')
+}
+
+function handleSubmissionDrop(event: DragEvent) {
+  if (!isPointerOverSubmissionEnvelope(event.clientX, event.clientY)) return
+  event.preventDefault()
+  event.stopPropagation()
+  const file = event.dataTransfer?.files?.[0]
+  if (file) void submitApplicationFile(file)
 }
 
 function setupRaccoonPushedTree(root: THREE.Object3D) {
@@ -548,7 +1034,7 @@ function startCameraEntrance(object: THREE.Object3D, framingObject: THREE.Object
     camera.position.copy(finalCameraPosition)
     camera.lookAt(endCameraTarget)
     controls.target.copy(endCameraTarget)
-    controls.enabled = false
+    controls.enabled = true
     controls.autoRotate = false
     controls.update()
     loginPanelVisible.value = true
@@ -590,8 +1076,106 @@ function applyHouseTransform() {
   houseModel?.scale.setScalar(houseDebug.scale)
 }
 
+function applyMailboxTransform() {
+  if (!mailboxModel) return
+  mailboxModel.position.set(mailboxDebug.x, mailboxDebug.y, mailboxDebug.z)
+  mailboxModel.rotation.set(
+    THREE.MathUtils.degToRad(mailboxDebug.rotationX),
+    THREE.MathUtils.degToRad(mailboxDebug.rotationY),
+    THREE.MathUtils.degToRad(mailboxDebug.rotationZ),
+  )
+  mailboxModel.scale.setScalar(mailboxDebug.scale)
+}
+
+function prepareMailboxModel(source: THREE.Object3D) {
+  source.traverse((child) => {
+    if (!(child instanceof THREE.Mesh)) return
+    child.castShadow = true
+    child.receiveShadow = true
+    const materials = Array.isArray(child.material) ? child.material : [child.material]
+    materials.forEach(fixMailboxMaterial)
+  })
+
+  const bounds = new THREE.Box3().setFromObject(source)
+  const center = bounds.getCenter(new THREE.Vector3())
+  const size = bounds.getSize(new THREE.Vector3())
+  source.position.x -= center.x
+  source.position.y -= bounds.min.y
+  source.position.z -= center.z
+
+  const normalizedGroup = new THREE.Group()
+  normalizedGroup.name = 'Mailbox_Normalized'
+  normalizedGroup.scale.setScalar(1 / Math.max(size.y, 0.0001))
+  normalizedGroup.add(source)
+
+  const wrapper = new THREE.Group()
+  wrapper.name = 'Stylized_Mailbox'
+  wrapper.add(normalizedGroup)
+  return wrapper
+}
+
+function printMailboxParameters() {
+  console.info('[信箱模型] 当前变换参数', {
+    position: { x: mailboxDebug.x, y: mailboxDebug.y, z: mailboxDebug.z },
+    rotationDegrees: {
+      x: mailboxDebug.rotationX,
+      y: mailboxDebug.rotationY,
+      z: mailboxDebug.rotationZ,
+    },
+    scale: mailboxDebug.scale,
+  })
+}
+
+function focusMailbox() {
+  if (!mailboxModel || !camera || !controls) return
+  const bounds = new THREE.Box3().setFromObject(mailboxModel)
+  const center = bounds.getCenter(new THREE.Vector3())
+  const size = bounds.getSize(new THREE.Vector3())
+  const distance = Math.max(size.x, size.y, size.z, 0.05) * 3.2
+  const viewDirection = camera.position.clone().sub(controls.target)
+  if (viewDirection.lengthSq() < 0.000001) viewDirection.set(1, 0.6, 1)
+  viewDirection.normalize()
+  controls.target.copy(center)
+  camera.position.copy(center).addScaledVector(viewDirection, distance)
+  camera.lookAt(center)
+  controls.enabled = true
+  controls.update()
+}
+
+function printVenueTabParameters() {
+  console.info('[场地书签] 当前位置参数', {
+    left: {
+      x: venueTabDebug.leftX,
+      y: venueTabDebug.leftY,
+      itemY: [
+        venueTabDebug.left1Y,
+        venueTabDebug.left2Y,
+        venueTabDebug.left3Y,
+        venueTabDebug.left4Y,
+        venueTabDebug.left5Y,
+      ],
+    },
+    right: {
+      x: venueTabDebug.rightX,
+      y: venueTabDebug.rightY,
+      itemY: [
+        venueTabDebug.right1Y,
+        venueTabDebug.right2Y,
+        venueTabDebug.right3Y,
+        venueTabDebug.right4Y,
+      ],
+    },
+  })
+}
+
 function applyPostLoginClipboardTransform() {
   Object.assign(clipboardDebug, postLoginClipboardDebug)
+  applyClipboardTransform()
+  refreshCameraDebugGui()
+}
+
+function applyHomeClipboardTransform() {
+  Object.assign(clipboardDebug, clipboardHomeTransform)
   applyClipboardTransform()
   refreshCameraDebugGui()
 }
@@ -722,10 +1306,113 @@ function createCameraDebugGui(distance: number, target: THREE.Vector3) {
     .name('统一缩放')
     .onChange(applyHouseTransform)
 
+  const mailboxFolder = debugGui.addFolder('信箱模型位置与大小')
+  mailboxFolder.add(mailboxDebug, 'x', -2, 2, 0.001).name('位置 X').onChange(applyMailboxTransform)
+  mailboxFolder.add(mailboxDebug, 'y', -2, 2, 0.001).name('位置 Y').onChange(applyMailboxTransform)
+  mailboxFolder.add(mailboxDebug, 'z', -2, 2, 0.001).name('位置 Z').onChange(applyMailboxTransform)
+  mailboxFolder
+    .add(mailboxDebug, 'rotationX', -180, 180, 0.1)
+    .name('旋转 X°')
+    .onChange(applyMailboxTransform)
+  mailboxFolder
+    .add(mailboxDebug, 'rotationY', -180, 180, 0.1)
+    .name('旋转 Y°')
+    .onChange(applyMailboxTransform)
+  mailboxFolder
+    .add(mailboxDebug, 'rotationZ', -180, 180, 0.1)
+    .name('旋转 Z°')
+    .onChange(applyMailboxTransform)
+  mailboxFolder
+    .add(mailboxDebug, 'scale', 0.01, 1, 0.001)
+    .name('统一缩放')
+    .onChange(applyMailboxTransform)
+  mailboxFolder.add(mailboxActions, 'focus').name('聚焦信箱')
+  mailboxFolder.add(mailboxActions, 'printCurrent').name('输出信箱参数')
+
+  const venueTabFolder = debugGui.addFolder('两侧场地书签位置')
+  venueTabFolder.add(venueTabDebug, 'leftX', -180, 180, 1).name('左侧横向 px')
+  venueTabFolder.add(venueTabDebug, 'leftY', -180, 180, 1).name('左侧整体上下 px')
+  venueTabFolder.add(venueTabDebug, 'rightX', -180, 180, 1).name('右侧横向 px')
+  venueTabFolder.add(venueTabDebug, 'rightY', -180, 180, 1).name('右侧整体上下 px')
+
+  const leftVenueTabFolder = venueTabFolder.addFolder('左侧独立上下')
+  leftVenueTabFolder.add(venueTabDebug, 'left1Y', -120, 120, 1).name('标签 1 px')
+  leftVenueTabFolder.add(venueTabDebug, 'left2Y', -120, 120, 1).name('标签 2 px')
+  leftVenueTabFolder.add(venueTabDebug, 'left3Y', -120, 120, 1).name('标签 3 px')
+  leftVenueTabFolder.add(venueTabDebug, 'left4Y', -120, 120, 1).name('标签 4 px')
+  leftVenueTabFolder.add(venueTabDebug, 'left5Y', -120, 120, 1).name('标签 5 px')
+
+  const rightVenueTabFolder = venueTabFolder.addFolder('右侧独立上下')
+  rightVenueTabFolder.add(venueTabDebug, 'right1Y', -120, 120, 1).name('标签 1 px')
+  rightVenueTabFolder.add(venueTabDebug, 'right2Y', -120, 120, 1).name('标签 2 px')
+  rightVenueTabFolder.add(venueTabDebug, 'right3Y', -120, 120, 1).name('标签 3 px')
+  rightVenueTabFolder.add(venueTabDebug, 'right4Y', -120, 120, 1).name('标签 4 px')
+  venueTabFolder.add(venueTabActions, 'printCurrent').name('输出书签位置参数')
+
   const postLoginMotionFolder = debugGui.addFolder('登录后动画衔接')
   postLoginMotionFolder
     .add(postLoginMotionDebug, 'overlapDuration', 0, 1.2, 0.05)
     .name('重叠时间 秒')
+
+  const applicationMotionFolder = debugGui.addFolder('申请运镜时间')
+  applicationMotionFolder
+    .add(applicationMotionDebug, 'cameraDelay', 0, 2, 0.05)
+    .name('镜头延迟 秒')
+  applicationMotionFolder
+    .add(applicationMotionDebug, 'cameraDuration', 0.5, 5, 0.05)
+    .name('镜头时长 秒')
+  applicationMotionFolder
+    .add(applicationMotionDebug, 'clipboardDelay', 0, 2, 0.05)
+    .name('文件夹延迟 秒')
+  applicationMotionFolder
+    .add(applicationMotionDebug, 'clipboardDuration', 0.4, 4, 0.05)
+    .name('文件夹时长 秒')
+  applicationMotionFolder.add(applicationMotionActions, 'replay').name('重新预览申请运镜')
+
+  const submissionEnvelopeFolder = debugGui.addFolder('3D 信封动画')
+  submissionEnvelopeFolder
+    .add(submissionEnvelopeDebug, 'x', -0.4, 0.4, 0.001)
+    .name('终点 X')
+    .onChange(applySubmissionEnvelopeDebugTransform)
+  submissionEnvelopeFolder
+    .add(submissionEnvelopeDebug, 'y', -0.25, 0.25, 0.001)
+    .name('终点 Y')
+    .onChange(applySubmissionEnvelopeDebugTransform)
+  submissionEnvelopeFolder
+    .add(submissionEnvelopeDebug, 'z', -1, -0.03, 0.001)
+    .name('终点 Z')
+    .onChange(applySubmissionEnvelopeDebugTransform)
+  submissionEnvelopeFolder
+    .add(submissionEnvelopeDebug, 'rotationX', -180, 180, 0.1)
+    .name('旋转 X°')
+    .onChange(applySubmissionEnvelopeDebugTransform)
+  submissionEnvelopeFolder
+    .add(submissionEnvelopeDebug, 'rotationY', -180, 180, 0.1)
+    .name('旋转 Y°')
+    .onChange(applySubmissionEnvelopeDebugTransform)
+  submissionEnvelopeFolder
+    .add(submissionEnvelopeDebug, 'rotationZ', -180, 180, 0.1)
+    .name('旋转 Z°')
+    .onChange(applySubmissionEnvelopeDebugTransform)
+  submissionEnvelopeFolder
+    .add(submissionEnvelopeDebug, 'scale', 0.01, 0.4, 0.001)
+    .name('统一缩放')
+    .onChange(applySubmissionEnvelopeDebugTransform)
+  submissionEnvelopeFolder
+    .add(submissionEnvelopeDebug, 'startAdvance', 0, 3, 0.05)
+    .name('提前飞出 秒')
+  submissionEnvelopeFolder
+    .add(submissionEnvelopeDebug, 'flyDuration', 0.15, 4, 0.05)
+    .name('飞出时长 秒')
+  submissionEnvelopeFolder
+    .add(submissionEnvelopeDebug, 'returnDuration', 0.15, 4, 0.05)
+    .name('收回时长 秒')
+  submissionEnvelopeFolder
+    .add(submissionEnvelopeDebug, 'successHold', 0, 5, 0.05)
+    .name('成功停留 秒')
+  submissionEnvelopeFolder.add(submissionEnvelopeActions, 'previewOut').name('预览信封飞出')
+  submissionEnvelopeFolder.add(submissionEnvelopeActions, 'previewReturn').name('预览信封收回')
+  submissionEnvelopeFolder.add(submissionEnvelopeActions, 'printCurrent').name('输出信封参数')
 
   const pushedTreeFolder = debugGui.addFolder('浣熊推树动画')
   pushedTreeFolder.add(pushedTreeDebug, 'enabled').name('启用')
@@ -752,9 +1439,15 @@ function createCameraDebugGui(distance: number, target: THREE.Vector3) {
   positionFolder.close()
   endPositionFolder.close()
   motionFolder.close()
-  clipboardFolder.open()
-  houseFolder.open()
+  clipboardFolder.close()
+  houseFolder.close()
+  mailboxFolder.close()
+  venueTabFolder.close()
+  leftVenueTabFolder.close()
+  rightVenueTabFolder.close()
   postLoginMotionFolder.open()
+  applicationMotionFolder.open()
+  submissionEnvelopeFolder.open()
   pushedTreeFolder.close()
 }
 
@@ -825,6 +1518,10 @@ function playCameraEntrance() {
   if (!camera || !controls || !startCameraTarget || !endCameraTarget || !finalCameraPosition) return
 
   postLoginFlight = null
+  applicationFlight = null
+  selectedApplicationTarget = null
+  applicationStageActive.value = false
+  resetSubmissionEnvelope()
 
   startCameraTarget.set(
     cameraDebug.startTargetX,
@@ -873,6 +1570,10 @@ function playPostLoginCamera() {
   if (!camera || !controls) return
 
   cameraFlight = null
+  applicationFlight = null
+  selectedApplicationTarget = null
+  applicationStageActive.value = false
+  resetSubmissionEnvelope()
   loginPanelVisible.value = false
   controls.enabled = false
   controls.autoRotate = false
@@ -898,7 +1599,7 @@ function playPostLoginCamera() {
     camera.lookAt(endTarget)
     controls.target.copy(endTarget)
     applyPostLoginClipboardTransform()
-    controls.enabled = false
+    controls.enabled = true
     controls.update()
     cinematicActive.value = false
     return
@@ -922,6 +1623,99 @@ function playPostLoginCamera() {
     overlapDuration: THREE.MathUtils.clamp(postLoginMotionDebug.overlapDuration, 0, 1.2),
     startedAt: performance.now(),
   }
+}
+
+function playApplicationCamera(target: ApplicationNavigationTarget) {
+  if (!camera || !controls || !clipboardModel || cinematicActive.value) return
+
+  cameraFlight = null
+  postLoginFlight = null
+  applicationFlight = null
+  resetSubmissionEnvelope()
+  clearSubmissionNotice()
+  selectedApplicationTarget = target
+  applicationStageActive.value = true
+  controls.enabled = false
+  controls.autoRotate = false
+  cinematicActive.value = true
+
+  const endPosition = new THREE.Vector3(-0.18, 0.0023, 0.0096)
+  const endTarget = new THREE.Vector3(-0.0412, -0.0195, 0.0245)
+  const endClipboardPosition = new THREE.Vector3(
+    clipboardHomeTransform.x,
+    clipboardHomeTransform.y,
+    clipboardHomeTransform.z,
+  )
+  const endClipboardQuaternion = new THREE.Quaternion().setFromEuler(
+    new THREE.Euler(
+      THREE.MathUtils.degToRad(clipboardHomeTransform.rotationX),
+      THREE.MathUtils.degToRad(clipboardHomeTransform.rotationY),
+      THREE.MathUtils.degToRad(clipboardHomeTransform.rotationZ),
+    ),
+  )
+
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    camera.position.copy(endPosition)
+    camera.lookAt(endTarget)
+    controls.target.copy(endTarget)
+    applyHomeClipboardTransform()
+    controls.enabled = true
+    controls.update()
+    cinematicActive.value = false
+    showSubmissionEnvelope()
+    return
+  }
+
+  const cameraDelay = THREE.MathUtils.clamp(applicationMotionDebug.cameraDelay, 0, 2)
+  const cameraDuration = THREE.MathUtils.clamp(applicationMotionDebug.cameraDuration, 0.5, 5)
+  const clipboardDelay = THREE.MathUtils.clamp(applicationMotionDebug.clipboardDelay, 0, 2)
+  const clipboardDuration = THREE.MathUtils.clamp(
+    applicationMotionDebug.clipboardDuration,
+    0.4,
+    4,
+  )
+  applicationFlight = {
+    startPosition: camera.position.clone(),
+    endPosition,
+    startTarget: controls.target.clone(),
+    endTarget,
+    currentTarget: controls.target.clone(),
+    startClipboardPosition: clipboardModel.position.clone(),
+    endClipboardPosition,
+    startClipboardQuaternion: clipboardModel.quaternion.clone(),
+    endClipboardQuaternion,
+    startClipboardScale: clipboardModel.scale.x,
+    endClipboardScale: clipboardHomeTransform.scale,
+    cameraDelay,
+    cameraDuration,
+    clipboardDelay,
+    clipboardDuration,
+    totalDuration: Math.max(cameraDelay + cameraDuration, clipboardDelay + clipboardDuration),
+    envelopeStarted: false,
+    startedAt: performance.now(),
+  }
+}
+
+function replayApplicationCamera() {
+  if (!camera || !controls || !clipboardModel) return
+
+  applicationFlight = null
+  applicationStageActive.value = false
+  cinematicActive.value = false
+  resetSubmissionEnvelope()
+  camera.position.set(-0.1281, 0.0195, 0.1744)
+  controls.target.set(-0.0355, 0.0055, -0.0319)
+  camera.lookAt(controls.target)
+  applyPostLoginClipboardTransform()
+  controls.enabled = true
+  controls.update()
+
+  const target = selectedApplicationTarget ?? {
+    venueId: selectedVenueId.value ?? 0,
+    venueName: venueOptions.value.find((venue) => venue.id === selectedVenueId.value)?.name ?? '预览场地',
+    date: getLocalDateKey(offsetDate(new Date(), 1)),
+  }
+  requestAnimationFrame(() => playApplicationCamera(target))
 }
 
 function easeInOutCubic(progress: number) {
@@ -971,7 +1765,7 @@ function updateCameraEntrance(now: number) {
     camera.position.copy(finalCameraPosition ?? camera.position)
     camera.lookAt(cameraFlight.endTarget)
     controls.target.copy(cameraFlight.endTarget)
-    controls.enabled = false
+    controls.enabled = true
     controls.autoRotate = false
     controls.update()
     cameraFlight = null
@@ -1036,10 +1830,88 @@ function updatePostLoginCamera(now: number) {
     camera.lookAt(postLoginFlight.endTarget)
     controls.target.copy(postLoginFlight.endTarget)
     applyPostLoginClipboardTransform()
-    controls.enabled = false
+    controls.enabled = true
     controls.update()
     postLoginFlight = null
     cinematicActive.value = false
+    return false
+  }
+
+  return true
+}
+
+function updateApplicationCamera(now: number) {
+  if (!camera || !controls || !applicationFlight) return false
+
+  const elapsed = (now - applicationFlight.startedAt) / 1000
+  const cameraProgress = THREE.MathUtils.clamp(
+    (elapsed - applicationFlight.cameraDelay) / applicationFlight.cameraDuration,
+    0,
+    1,
+  )
+  const clipboardProgress = THREE.MathUtils.clamp(
+    (elapsed - applicationFlight.clipboardDelay) / applicationFlight.clipboardDuration,
+    0,
+    1,
+  )
+  const easedCameraProgress = easeInOutCubic(cameraProgress)
+  const easedClipboardProgress = easeInOutCubic(clipboardProgress)
+
+  camera.position.lerpVectors(
+    applicationFlight.startPosition,
+    applicationFlight.endPosition,
+    easedCameraProgress,
+  )
+  applicationFlight.currentTarget.lerpVectors(
+    applicationFlight.startTarget,
+    applicationFlight.endTarget,
+    easedCameraProgress,
+  )
+  camera.lookAt(applicationFlight.currentTarget)
+  controls.target.copy(applicationFlight.currentTarget)
+
+  if (clipboardModel) {
+    clipboardModel.position.lerpVectors(
+      applicationFlight.startClipboardPosition,
+      applicationFlight.endClipboardPosition,
+      easedClipboardProgress,
+    )
+    clipboardModel.quaternion.slerpQuaternions(
+      applicationFlight.startClipboardQuaternion,
+      applicationFlight.endClipboardQuaternion,
+      easedClipboardProgress,
+    )
+    clipboardModel.scale.setScalar(
+      THREE.MathUtils.lerp(
+        applicationFlight.startClipboardScale,
+        applicationFlight.endClipboardScale,
+        easedClipboardProgress,
+      ),
+    )
+  }
+
+  const envelopeAdvance = THREE.MathUtils.clamp(
+    submissionEnvelopeDebug.startAdvance,
+    0,
+    applicationFlight.totalDuration,
+  )
+  const envelopeStartAt = applicationFlight.totalDuration - envelopeAdvance
+  if (!applicationFlight.envelopeStarted && elapsed >= envelopeStartAt) {
+    applicationFlight.envelopeStarted = true
+    showSubmissionEnvelope()
+  }
+
+  if (elapsed >= applicationFlight.totalDuration) {
+    camera.position.copy(applicationFlight.endPosition)
+    camera.lookAt(applicationFlight.endTarget)
+    controls.target.copy(applicationFlight.endTarget)
+    applyHomeClipboardTransform()
+    controls.enabled = true
+    controls.update()
+    const shouldStartEnvelope = !applicationFlight.envelopeStarted
+    applicationFlight = null
+    cinematicActive.value = false
+    if (shouldStartEnvelope) showSubmissionEnvelope()
     return false
   }
 
@@ -1066,11 +1938,18 @@ function isVisibleInScene(object: THREE.Object3D) {
   return true
 }
 
-function isPointerOverPaper(clientX: number, clientY: number) {
-  if (!renderer || !camera || !model || !pageContentCanvas) return false
+function getPaperPointerPosition(clientX: number, clientY: number) {
+  if (
+    !renderer
+    || !camera
+    || !model
+    || !pageContentCanvas
+    || !paperSurfaceMesh
+    || !paperContentBounds
+  ) return null
 
   const bounds = renderer.domElement.getBoundingClientRect()
-  if (!bounds.width || !bounds.height) return false
+  if (!bounds.width || !bounds.height) return null
   pagePointer.set(
     ((clientX - bounds.left) / bounds.width) * 2 - 1,
     -((clientY - bounds.top) / bounds.height) * 2 + 1,
@@ -1087,10 +1966,28 @@ function isPointerOverPaper(clientX: number, clientY: number) {
     // the paper behind the metal clamp or wooden frame from receiving scroll.
     const materials = Array.isArray(object.material) ? object.material : [object.material]
     const materialIndex = intersection.face?.materialIndex ?? 0
-    return materials[materialIndex]?.name === 'Clean_Yellow_Parchment'
+    if (materials[materialIndex]?.name !== 'Clean_Yellow_Parchment') return null
+    if (object !== paperSurfaceMesh) return null
+
+    const localPoint = object.worldToLocal(intersection.point.clone())
+    const normalizedX = (localPoint.x - paperContentBounds.minX) / paperContentBounds.width
+    // CanvasTexture uploads with flipY enabled. The shader's inverted V is
+    // flipped once more during upload, so Canvas pixel Y follows local Y.
+    const normalizedY = (localPoint.y - paperContentBounds.minY) / paperContentBounds.height
+    if (
+      normalizedX < 0
+      || normalizedX > 1
+      || normalizedY < 0
+      || normalizedY > 1
+    ) return null
+    return { x: normalizedX, y: normalizedY }
   }
 
-  return false
+  return null
+}
+
+function isPointerOverPaper(clientX: number, clientY: number) {
+  return getPaperPointerPosition(clientX, clientY) !== null
 }
 
 function handlePaperWheel(event: WheelEvent) {
@@ -1104,14 +2001,86 @@ function handlePaperWheel(event: WheelEvent) {
 }
 
 function handlePaperPointerMove(event: PointerEvent) {
-  if (!renderer) return
-  renderer.domElement.style.cursor = isPointerOverPaper(event.clientX, event.clientY)
-    ? 'ns-resize'
+  if (!renderer || !pageContentCanvas) return
+  if (isPointerOverSubmissionEnvelope(event.clientX, event.clientY)) {
+    pageContentCanvas.pointerLeave()
+    renderer.domElement.style.cursor = submissionEnvelopeState === 'uploading' ? 'progress' : 'pointer'
+    return
+  }
+  const pointer = getPaperPointerPosition(event.clientX, event.clientY)
+  if (!pointer) {
+    pageContentCanvas.pointerLeave()
+    renderer.domElement.style.cursor = ''
+    return
+  }
+
+  pageContentCanvas.pointerMove(pointer.x, pointer.y)
+  renderer.domElement.style.cursor = pageContentCanvas.getPageAction(pointer.x, pointer.y)
+    ? 'pointer'
     : ''
 }
 
 function handlePaperPointerLeave() {
+  pageContentCanvas?.pointerLeave()
   if (renderer) renderer.domElement.style.cursor = ''
+}
+
+async function startNewVenueApplication() {
+  if (applicationTabLoading.value) return
+  let venue = venueOptions.value.find((item) => item.id === selectedVenueId.value)
+    ?? venueOptions.value[0]
+    ?? venueUsageBoard?.venues[0]
+  if (!venue) {
+    applicationTabLoading.value = true
+    await loadVenueUsageBoard()
+    applicationTabLoading.value = false
+    venue = venueOptions.value.find((item) => item.id === selectedVenueId.value)
+      ?? venueOptions.value[0]
+      ?? venueUsageBoard?.venues[0]
+    if (!venue) {
+      showSubmissionNotice('error', '场地信息加载失败，请稍后再试', 3200)
+      return
+    }
+  }
+  selectedVenueId.value = venue.id
+  playApplicationCamera({
+    venueId: venue.id,
+    venueName: venue.name,
+    date: getLocalDateKey(offsetDate(new Date(), 1)),
+    mode: 'new',
+  })
+}
+
+function handlePaperClick(event: PointerEvent) {
+  if (isPointerOverSubmissionEnvelope(event.clientX, event.clientY)) {
+    openSubmissionFilePicker()
+    return
+  }
+  if (!pageContentCanvas || cinematicActive.value || applicationStageActive.value) return
+  const pointer = getPaperPointerPosition(event.clientX, event.clientY)
+  if (!pointer) return
+  const action = pageContentCanvas.getPageAction(pointer.x, pointer.y)
+  if (action?.type === 'switch-page') {
+    switchFolderPage(action.page)
+    return
+  }
+  if (action?.type === 'supplement') {
+    const application = action.application
+    playApplicationCamera({
+      venueId: application.venueId ?? 0,
+      venueName: application.venueName,
+      date: application.startAt
+        ? getLocalDateKey(new Date(application.startAt))
+        : getLocalDateKey(new Date()),
+      mode: 'supplement',
+      applicationId: application.id,
+    })
+    return
+  }
+  const target = pageContentCanvas.getApplicationTarget(pointer.x, pointer.y)
+  if (!target) return
+
+  playApplicationCamera(target)
 }
 
 function cachePaperFacePoints(paper: THREE.Mesh) {
@@ -1157,15 +2126,16 @@ function cachePaperFacePoints(paper: THREE.Mesh) {
 }
 
 function updateVenueSelectorPosition() {
+  const positioningLayer = venueSelector.value ?? applicationTab.value?.parentElement
   if (
-    !venueSelector.value
+    !positioningLayer
     || !paperSurfaceMesh
     || !renderer
     || !camera
-    || !venueSelectorReady.value
+    || (!venueSelectorReady.value && !applicationTab.value)
   ) return
 
-  const selectorBounds = venueSelector.value.getBoundingClientRect()
+  const selectorBounds = positioningLayer.getBoundingClientRect()
   const rendererBounds = renderer.domElement.getBoundingClientRect()
   if (!selectorBounds.width || !rendererBounds.width || rendererBounds.width < 860) return
 
@@ -1218,22 +2188,43 @@ function updateVenueSelectorPosition() {
   const paperHeight = maxY - minY
   const leftSlots = [0.14, 0.31, 0.47, 0.64, 0.83]
   const rightSlots = [0.21, 0.38, 0.56, 0.75]
-  const tabClips = venueSelector.value.querySelectorAll<HTMLElement>('.venue-tab-clip')
+  const leftItemOffsets = [
+    venueTabDebug.left1Y,
+    venueTabDebug.left2Y,
+    venueTabDebug.left3Y,
+    venueTabDebug.left4Y,
+    venueTabDebug.left5Y,
+  ]
+  const rightItemOffsets = [
+    venueTabDebug.right1Y,
+    venueTabDebug.right2Y,
+    venueTabDebug.right3Y,
+    venueTabDebug.right4Y,
+  ]
+  const venueButtons = venueSelector.value?.querySelectorAll<HTMLElement>('.venue-float-button') ?? []
 
-  tabClips.forEach((tabClip, index) => {
+  venueButtons.forEach((venueButton, index) => {
     const isLeft = index % 2 === 0
     const sideIndex = Math.floor(index / 2)
     const verticalRatio = isLeft
       ? (leftSlots[sideIndex] ?? 0.5)
       : (rightSlots[sideIndex] ?? 0.5)
+    const sideOffsetY = isLeft ? venueTabDebug.leftY : venueTabDebug.rightY
+    const itemOffsetY = isLeft
+      ? (leftItemOffsets[sideIndex] ?? 0)
+      : (rightItemOffsets[sideIndex] ?? 0)
 
-    // Each clip ends exactly at the projected paper edge. The button extends
-    // 14px beneath it, but that part is clipped so the real 3D sheet remains
-    // visible in front and creates a convincing foreground occlusion.
-    tabClip.style.left = `${isLeft ? 0 : maxX}px`
-    tabClip.style.width = `${isLeft ? minX : selectorBounds.width - maxX}px`
-    tabClip.style.top = `${minY + paperHeight * verticalRatio}px`
+    // Anchor each ordinary DOM button directly to the projected paper edge.
+    // The 14px overlap remains visible; there is intentionally no clipping or
+    // simulated depth occlusion in this DOM version.
+    venueButton.style.left = `${isLeft ? minX + venueTabDebug.leftX : maxX + venueTabDebug.rightX}px`
+    venueButton.style.top = `${minY + paperHeight * verticalRatio + sideOffsetY + itemOffsetY}px`
   })
+
+  if (applicationTab.value) {
+    applicationTab.value.style.left = `${maxX - 5}px`
+    applicationTab.value.style.top = `${minY + paperHeight * 0.86}px`
+  }
 }
 
 function animate() {
@@ -1247,7 +2238,8 @@ function animate() {
   pageContentCanvas?.tick()
 
   const now = performance.now()
-  const cameraIsMoving = updateCameraEntrance(now) || updatePostLoginCamera(now)
+  const cameraIsMoving =
+    updateCameraEntrance(now) || updatePostLoginCamera(now) || updateApplicationCamera(now)
   if (!cameraIsMoving) controls?.update()
   updateVenueSelectorPosition()
   updateCameraReadout()
@@ -1266,7 +2258,8 @@ async function handleLogin() {
 
   if (success) {
     loginSucceeded.value = true
-    void loadVenueUsageBoard()
+    folderPage.value = 'profile'
+    void loadPersonalHome()
     playPostLoginCamera()
     return
   }
@@ -1305,7 +2298,8 @@ async function loadVenueUsageBoard() {
     state: 'loading',
     venues: [],
   }
-  pageContentCanvas.updateUsageBoard(loadingBoard)
+  venueUsageBoard = loadingBoard
+  if (folderPage.value === 'calendar') pageContentCanvas.updateUsageBoard(loadingBoard)
 
   try {
     const { data } = await axios.get<VenueUsageRangeApi>('/api/v1/venues/usage-range', {
@@ -1335,14 +2329,15 @@ async function loadVenueUsageBoard() {
         })),
     }))
 
-    pageContentCanvas.updateUsageBoard({
+    venueUsageBoard = {
       mode,
       date: dateKey,
       rangeStart: data.start_date,
       rangeEnd: data.end_date,
       state: 'ready',
       venues: usageItems,
-    })
+    }
+    if (folderPage.value === 'calendar') pageContentCanvas.updateUsageBoard(venueUsageBoard)
     if (mode === 'user-detail') {
       venueOptions.value = data.venues.map(({ venue }) => venue)
       selectedVenueId.value = venueOptions.value[0]?.id ?? null
@@ -1353,7 +2348,7 @@ async function loadVenueUsageBoard() {
     }
   } catch (error) {
     console.error('[场地使用看板] 数据加载失败', error)
-    pageContentCanvas.updateUsageBoard({
+    venueUsageBoard = {
       mode,
       date: dateKey,
       rangeStart,
@@ -1361,11 +2356,90 @@ async function loadVenueUsageBoard() {
       state: 'error',
       venues: [],
       error: '请确认本地后端服务已启动',
-    })
+    }
+    if (folderPage.value === 'calendar') pageContentCanvas.updateUsageBoard(venueUsageBoard)
     venueOptions.value = []
     selectedVenueId.value = null
     venueSelectorReady.value = false
   }
+}
+
+async function loadPersonalHome() {
+  if (!pageContentCanvas) return
+  const dateKey = getLocalDateKey(new Date())
+  personalHomeBoard = {
+    mode: 'profile',
+    date: dateKey,
+    state: 'loading',
+    venues: [],
+    applications: [],
+  }
+  if (folderPage.value === 'profile') pageContentCanvas.updateUsageBoard(personalHomeBoard)
+
+  try {
+    if (!auth.user) await auth.fetchMe()
+    const [applicationsResponse, venuesResponse] = await Promise.all([
+      axios.get<PersonalApplicationApi[]>('/api/v1/applications'),
+      axios.get<VenueApiItem[]>('/api/v1/venues'),
+    ])
+    const user = auth.user
+    if (!user) throw new Error('当前用户信息不可用')
+    const venueNames = new Map(venuesResponse.data.map((venue) => [venue.id, venue.name]))
+    const applications: PersonalApplicationItem[] = applicationsResponse.data.map(
+      (application) => ({
+        id: application.id,
+        applicationType: application.application_type,
+        venueId: application.venue_id,
+        venueName: application.venue_id
+          ? venueNames.get(application.venue_id) ?? `场地 #${application.venue_id}`
+          : application.application_type === 'key_borrow'
+            ? '钥匙借用'
+            : '综合申请',
+        purpose: cleanPurposeSummary(application.purpose_summary),
+        status: application.status,
+        startAt: application.start_at,
+        endAt: application.end_at,
+        createdAt: application.created_at,
+      }),
+    )
+    personalHomeBoard = {
+      mode: 'profile',
+      date: dateKey,
+      state: 'ready',
+      venues: [],
+      profile: {
+        email: user.email,
+        organization: user.department || '未填写所属组织',
+        role: user.role,
+        verified: user.is_sdu_verified,
+        applicationAllowed: user.is_application_allowed || user.is_sdu_verified,
+      },
+      applications,
+    }
+  } catch (error) {
+    console.error('[个人首页] 数据加载失败', error)
+    personalHomeBoard = {
+      mode: 'profile',
+      date: dateKey,
+      state: 'error',
+      venues: [],
+      applications: [],
+      error: '请确认本地后端服务已启动并重新登录',
+    }
+  }
+  if (folderPage.value === 'profile') pageContentCanvas.updateUsageBoard(personalHomeBoard)
+}
+
+function switchFolderPage(page: 'profile' | 'calendar') {
+  if (folderPage.value === page) return
+  folderPage.value = page
+  if (page === 'profile') {
+    if (personalHomeBoard) pageContentCanvas?.transitionUsageBoard(personalHomeBoard)
+    else void loadPersonalHome()
+    return
+  }
+  if (venueUsageBoard) pageContentCanvas?.transitionUsageBoard(venueUsageBoard)
+  else void loadVenueUsageBoard()
 }
 
 function selectUsageVenue(venueId: number) {
@@ -1516,7 +2590,8 @@ async function handleRegister() {
   if (success) {
     loginSucceeded.value = true
     stopSmsCountdown()
-    void loadVenueUsageBoard()
+    folderPage.value = 'profile'
+    void loadPersonalHome()
     playPostLoginCamera()
     return
   }
@@ -1553,21 +2628,26 @@ onMounted(() => {
   renderer.shadowMap.enabled = true
   renderer.shadowMap.type = THREE.PCFShadowMap
   viewport.value.appendChild(renderer.domElement)
+  scene.add(camera)
 
   controls = new OrbitControls(camera, renderer.domElement)
   controls.enableDamping = true
   controls.dampingFactor = 0.06
   controls.enabled = false
   controls.autoRotate = false
-  controls.enableRotate = false
-  controls.enablePan = false
-  controls.enableZoom = false
+  controls.enableRotate = true
+  controls.enablePan = true
+  controls.enableZoom = true
   renderer.domElement.addEventListener('wheel', handlePaperWheel, {
     capture: true,
     passive: false,
   })
   renderer.domElement.addEventListener('pointermove', handlePaperPointerMove, { passive: true })
   renderer.domElement.addEventListener('pointerleave', handlePaperPointerLeave)
+  renderer.domElement.addEventListener('click', handlePaperClick)
+  renderer.domElement.addEventListener('dragover', handleSubmissionDragOver)
+  renderer.domElement.addEventListener('dragleave', handleSubmissionDragLeave)
+  renderer.domElement.addEventListener('drop', handleSubmissionDrop)
 
   scene.add(new THREE.HemisphereLight('#fff5dc', '#847b66', 2.25))
 
@@ -1594,9 +2674,14 @@ onMounted(() => {
   const loader = new GLTFLoader(loadingManager)
   const houseUrl = `${import.meta.env.BASE_URL}models/forest_house.glb`
   const clipboardUrl = `${import.meta.env.BASE_URL}models/downloaded_clipboard.glb`
+  const mailboxUrl = `${import.meta.env.BASE_URL}models/mailbox.glb`
 
-  Promise.all([loader.loadAsync(houseUrl), loader.loadAsync(clipboardUrl)])
-    .then(([houseGltf, clipboardGltf]) => {
+  Promise.all([
+    loader.loadAsync(houseUrl),
+    loader.loadAsync(clipboardUrl),
+    loader.loadAsync(mailboxUrl),
+  ])
+    .then(([houseGltf, clipboardGltf, mailboxGltf]) => {
       if (!scene) return
 
       model = new THREE.Group()
@@ -1605,8 +2690,11 @@ onMounted(() => {
       houseModel.name = 'Forest_House'
       clipboardModel = clipboardGltf.scene
       clipboardModel.name = 'Wooden_Clipboard'
+      mailboxModel = prepareMailboxModel(mailboxGltf.scene)
       applyClipboardTransform()
-      model.add(houseModel, clipboardModel)
+      applyMailboxTransform()
+      model.add(houseModel, clipboardModel, mailboxModel)
+      registerSubmissionEnvelope(mailboxModel)
 
       const topPageObject = clipboardModel.getObjectByName('Top_Page')
       topPage = topPageObject instanceof THREE.Mesh ? topPageObject : null
@@ -1640,11 +2728,12 @@ onMounted(() => {
 
         // Paint the Canvas content into the clipboard's original paper material.
         if (child !== topPage && pageContentCanvas) {
-          projectPageContentOntoMaterial(
+          const contentBounds = projectPageContentOntoMaterial(
             child,
             'Clean_Yellow_Parchment',
             pageContentCanvas.texture,
           )
+          if (child === paperSurfaceMesh && contentBounds) paperContentBounds = contentBounds
         }
       })
 
@@ -1690,7 +2779,7 @@ onMounted(() => {
     })
     .catch((error) => {
       console.error('Failed to load GLB models', error)
-      loadError.value = '小屋或文件夹模型加载失败，请检查文件路径或浏览器 WebGL 支持。'
+      loadError.value = '场景模型加载失败，请检查模型路径或浏览器 WebGL 支持。'
     })
 
   resizeObserver = new ResizeObserver(resizeRenderer)
@@ -1703,6 +2792,9 @@ onBeforeUnmount(() => {
   cancelAnimationFrame(animationFrame)
   stopSmsCountdown()
   revokeRegistrationCaptcha()
+  submissionEnvelopeTween?.kill()
+  if (submissionEnvelopeReturnTimer) clearTimeout(submissionEnvelopeReturnTimer)
+  if (submissionNoticeTimer) clearTimeout(submissionNoticeTimer)
   pageTurnTimeline?.kill()
   resizeObserver?.disconnect()
   controls?.dispose()
@@ -1710,6 +2802,12 @@ onBeforeUnmount(() => {
   renderer?.domElement.removeEventListener('wheel', handlePaperWheel, true)
   renderer?.domElement.removeEventListener('pointermove', handlePaperPointerMove)
   renderer?.domElement.removeEventListener('pointerleave', handlePaperPointerLeave)
+  renderer?.domElement.removeEventListener('click', handlePaperClick)
+  renderer?.domElement.removeEventListener('dragover', handleSubmissionDragOver)
+  renderer?.domElement.removeEventListener('dragleave', handleSubmissionDragLeave)
+  renderer?.domElement.removeEventListener('drop', handleSubmissionDrop)
+
+  resetSubmissionEnvelope()
 
   model?.traverse((child) => {
     if (!(child instanceof THREE.Mesh)) return
@@ -1728,18 +2826,27 @@ onBeforeUnmount(() => {
   model = null
   houseModel = null
   clipboardModel = null
+  mailboxModel = null
   topPage = null
   paperSurfaceMesh = null
+  paperContentBounds = null
   paperVisibleFacePoints = []
   paperVisibleFaceZ = 0
   pageTurnShader = null
   pageContentCanvas = null
+  personalHomeBoard = null
+  venueUsageBoard = null
   pageTurnTimeline = null
   pageTurnAvailable.value = false
   pageTurning.value = false
   pageTurnCompleted.value = false
   cameraFlight = null
   postLoginFlight = null
+  applicationFlight = null
+  selectedApplicationTarget = null
+  submissionEnvelope = null
+  submissionEnvelopeTween = null
+  submissionEnvelopeReturnTimer = null
   pushedTreeAnimation = null
   startCameraTarget = null
   endCameraTarget = null
@@ -1752,12 +2859,46 @@ onBeforeUnmount(() => {
 <template>
   <main class="model-page">
     <div ref="viewport" class="model-viewport" />
+    <input
+      ref="applicationFileInput"
+      class="submission-file-input"
+      type="file"
+      accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      aria-label="选择场地申请 Word 文件"
+      @change="handleApplicationFileChange"
+    />
+
+    <Transition name="submission-notice">
+      <aside
+        v-if="submissionNoticeVisible"
+        class="submission-success-notice"
+        :class="submissionNoticeMode"
+        role="status"
+        aria-live="polite"
+      >
+        <span class="submission-success-mark" aria-hidden="true">
+          {{ submissionNoticeMode === 'uploading' ? '↻' : submissionNoticeMode === 'success' ? '✓' : '!' }}
+        </span>
+        <span>
+          <strong>
+            {{
+              submissionNoticeMode === 'uploading'
+                ? '申请文件正在上传'
+                : submissionNoticeMode === 'success'
+                  ? '申请文件已送达'
+                  : '文件提交失败'
+            }}
+          </strong>
+          <small>{{ submissionNoticeMessage }}</small>
+        </span>
+      </aside>
+    </Transition>
 
     <div v-if="!modelReady && !loadError" class="loading-panel">
       <div class="loading-track">
         <span :style="{ width: `${loadingProgress}%` }" />
       </div>
-      <p>正在加载木质文件夹模型 {{ loadingProgress }}%</p>
+      <p>正在加载小屋、文件夹与信箱模型 {{ loadingProgress }}%</p>
     </div>
 
     <div v-if="loadError" class="error-panel">{{ loadError }}</div>
@@ -2068,36 +3209,53 @@ onBeforeUnmount(() => {
       </section>
     </Transition>
 
+    <Transition name="application-tab">
+      <button
+        v-if="loginSucceeded && folderPage === 'profile' && !cinematicActive && !applicationStageActive"
+        ref="applicationTab"
+        class="application-edge-tab"
+        type="button"
+        :disabled="applicationTabLoading"
+        aria-label="发起场地申请"
+        @click="startNewVenueApplication"
+      >
+        <span class="application-tab-sprig" aria-hidden="true">
+          <i />
+          <i />
+          <i />
+        </span>
+        <span>场地申请</span>
+        <span class="application-tab-seal" aria-hidden="true">
+          <i />
+        </span>
+      </button>
+    </Transition>
+
     <Transition name="venue-selector">
       <nav
-        v-if="venueSelectorReady && !cinematicActive"
+        v-if="folderPage === 'calendar' && venueSelectorReady && !cinematicActive && !applicationStageActive"
         ref="venueSelector"
         class="venue-floating-selector"
         aria-label="选择要查看的场地"
       >
-        <span
+        <button
           v-for="(venue, index) in venueOptions"
           :key="venue.id"
-          class="venue-tab-clip"
-          :class="index % 2 === 0 ? 'left' : 'right'"
+          type="button"
+          class="venue-float-button"
+          :class="{ active: selectedVenueId === venue.id }"
+          :style="{ animationDelay: `${index * 65}ms` }"
+          :aria-pressed="selectedVenueId === venue.id"
+          @click="selectUsageVenue(venue.id)"
         >
-          <button
-            type="button"
-            class="venue-float-button"
-            :class="{ active: selectedVenueId === venue.id }"
-            :style="{ animationDelay: `${index * 65}ms` }"
-            :aria-pressed="selectedVenueId === venue.id"
-            @click="selectUsageVenue(venue.id)"
-          >
-            <span class="venue-button-mark" aria-hidden="true" />
-            <span>{{ venue.name }}</span>
-          </button>
-        </span>
+          <span class="venue-button-mark" aria-hidden="true" />
+          <span>{{ venue.name }}</span>
+        </button>
       </nav>
     </Transition>
 
     <button
-      v-if="pageTurnEnabled && modelReady && pageTurnAvailable && !cinematicActive"
+      v-if="pageTurnEnabled && modelReady && pageTurnAvailable && !cinematicActive && !applicationStageActive"
       class="page-turn-button"
       type="button"
       :disabled="pageTurning"
@@ -2125,6 +3283,117 @@ onBeforeUnmount(() => {
   display: block;
   width: 100%;
   height: 100%;
+}
+
+.submission-file-input {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.submission-success-notice {
+  position: absolute;
+  top: 28px;
+  left: 50%;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 280px;
+  max-width: min(440px, calc(100vw - 32px));
+  padding: 13px 18px 13px 14px;
+  border: 1px solid rgba(91, 111, 80, 0.48);
+  border-radius: 5px 18px 5px 18px;
+  background:
+    linear-gradient(145deg, rgba(249, 241, 217, 0.96), rgba(226, 211, 171, 0.94)),
+    #efe2bf;
+  box-shadow:
+    0 14px 34px rgba(45, 54, 37, 0.22),
+    inset 0 1px rgba(255, 255, 255, 0.68);
+  color: #4f6049;
+  pointer-events: none;
+  backdrop-filter: blur(10px);
+  transform: translateX(-50%);
+}
+
+.submission-success-notice > span:last-child {
+  display: grid;
+  gap: 2px;
+}
+
+.submission-success-notice strong {
+  color: #43533f;
+  font-family: 'Songti SC', 'STSong', 'Noto Serif SC', serif;
+  font-size: 15px;
+  letter-spacing: 0.06em;
+}
+
+.submission-success-notice small {
+  color: rgba(74, 86, 66, 0.76);
+  font-size: 12px;
+}
+
+.submission-success-mark {
+  display: grid;
+  flex: 0 0 31px;
+  width: 31px;
+  height: 31px;
+  place-items: center;
+  border: 1px solid rgba(85, 109, 77, 0.52);
+  border-radius: 50% 44% 52% 46%;
+  background: #687f62;
+  color: #f8efd7;
+  font-family: Georgia, serif;
+  font-size: 18px;
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.22);
+  transform: rotate(-5deg);
+}
+
+.submission-success-notice.uploading .submission-success-mark {
+  background: #788670;
+  animation: submission-mark-spin 1.1s linear infinite;
+}
+
+.submission-success-notice.error {
+  border-color: rgba(139, 83, 63, 0.5);
+  color: #805443;
+}
+
+.submission-success-notice.error .submission-success-mark {
+  border-color: rgba(132, 74, 55, 0.58);
+  background: #9a624e;
+}
+
+.submission-success-notice.error strong {
+  color: #744936;
+}
+
+@keyframes submission-mark-spin {
+  from {
+    transform: rotate(-5deg);
+  }
+
+  to {
+    transform: rotate(355deg);
+  }
+}
+
+.submission-notice-enter-active,
+.submission-notice-leave-active {
+  transition:
+    opacity 280ms ease,
+    transform 360ms cubic-bezier(0.22, 1, 0.36, 1),
+    filter 280ms ease;
+}
+
+.submission-notice-enter-from,
+.submission-notice-leave-to {
+  opacity: 0;
+  filter: blur(4px);
+  transform: translate(-50%, -16px) scale(0.96);
 }
 
 .loading-panel,
@@ -2671,6 +3940,182 @@ onBeforeUnmount(() => {
   }
 }
 
+.application-edge-tab {
+  position: absolute;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 158px;
+  min-height: 48px;
+  padding: 10px 45px 10px 29px;
+  border: 1px solid rgba(111, 83, 49, 0.38);
+  border-left-color: rgba(111, 83, 49, 0.2);
+  background:
+    linear-gradient(138deg, rgba(255, 247, 218, 0.72), rgba(218, 192, 137, 0.26)),
+    #ead7a6;
+  box-shadow: inset 0 1px rgba(255, 252, 232, 0.74);
+  clip-path: polygon(0 8%, 91% 3%, 100% 18%, 97% 37%, 100% 57%, 96% 95%, 4% 91%, 0 79%, 2% 58%, 0 39%);
+  filter: drop-shadow(0 10px 10px rgba(60, 47, 30, 0.19));
+  color: #59442d;
+  font-family: 'Kaiti SC', 'STKaiti', 'Songti SC', serif;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+  transform: translateY(-50%) rotate(-1.8deg);
+  transform-origin: left center;
+  transition:
+    color 180ms ease,
+    border-color 180ms ease,
+    background 220ms ease,
+    filter 220ms ease,
+    transform 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.application-edge-tab::before {
+  position: absolute;
+  top: 10px;
+  right: 43px;
+  left: 26px;
+  border-top: 1px dashed rgba(122, 91, 50, 0.3);
+  content: '';
+}
+
+.application-edge-tab:not(:disabled):hover {
+  border-color: rgba(122, 86, 47, 0.55);
+  background:
+    linear-gradient(138deg, rgba(255, 250, 225, 0.88), rgba(226, 199, 143, 0.3)),
+    #f0dfb2;
+  filter: drop-shadow(0 15px 14px rgba(64, 49, 30, 0.28));
+  color: #4f3a25;
+  transform: translate(13px, calc(-50% - 3px)) rotate(-0.5deg) scale(1.035);
+}
+
+.application-edge-tab:not(:disabled):active {
+  transform: translate(9px, calc(-50% - 1px)) rotate(-0.5deg) scale(0.99);
+}
+
+.application-edge-tab:disabled {
+  cursor: wait;
+  opacity: 0.78;
+}
+
+.application-edge-tab:focus-visible {
+  filter:
+    drop-shadow(0 0 2px rgba(255, 244, 207, 1))
+    drop-shadow(0 0 7px rgba(101, 119, 96, 0.9));
+}
+
+.application-tab-sprig {
+  position: absolute;
+  top: 9px;
+  left: 10px;
+  width: 15px;
+  height: 30px;
+  transform: rotate(-16deg);
+  transition: transform 300ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.application-tab-sprig::before {
+  position: absolute;
+  top: 2px;
+  bottom: 1px;
+  left: 7px;
+  width: 2px;
+  border-radius: 2px;
+  background: #72806a;
+  content: '';
+  transform: rotate(8deg);
+}
+
+.application-tab-sprig i {
+  position: absolute;
+  width: 10px;
+  height: 5px;
+  border-radius: 70% 30% 65% 35%;
+  background: #87927a;
+}
+
+.application-tab-sprig i:nth-child(1) {
+  top: 5px;
+  left: 0;
+  transform: rotate(-34deg);
+}
+
+.application-tab-sprig i:nth-child(2) {
+  top: 13px;
+  left: 7px;
+  transform: rotate(28deg);
+}
+
+.application-tab-sprig i:nth-child(3) {
+  top: 22px;
+  left: 0;
+  transform: rotate(-28deg);
+}
+
+.application-edge-tab:not(:disabled):hover .application-tab-sprig {
+  transform: rotate(-7deg) translateY(-2px);
+}
+
+.application-tab-seal {
+  position: absolute;
+  top: 50%;
+  right: 9px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: #a4664d;
+  box-shadow:
+    0 3px 7px rgba(81, 42, 32, 0.22),
+    inset 0 0 0 3px rgba(107, 54, 40, 0.56),
+    inset 0 0 0 5px rgba(236, 194, 149, 0.15);
+  transform: translateY(-50%) rotate(-8deg);
+  transition: transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.application-tab-seal i,
+.application-tab-seal i::after {
+  position: absolute;
+  width: 10px;
+  height: 5px;
+  border-radius: 70% 30% 65% 35%;
+  background: #f0d6aa;
+  content: '';
+}
+
+.application-tab-seal i {
+  top: 15px;
+  left: 8px;
+  transform: rotate(-34deg);
+}
+
+.application-tab-seal i::after {
+  top: -6px;
+  left: 8px;
+  transform: rotate(12deg);
+}
+
+.application-edge-tab:not(:disabled):hover .application-tab-seal {
+  transform: translateY(-50%) rotate(5deg) scale(1.08);
+}
+
+.application-tab-enter-active,
+.application-tab-leave-active {
+  transition:
+    opacity 260ms ease,
+    filter 260ms ease,
+    transform 340ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.application-tab-enter-from,
+.application-tab-leave-to {
+  opacity: 0;
+  filter: blur(3px);
+  transform: translate(-22px, -50%) rotate(-4deg) scale(0.92);
+}
+
 .venue-floating-selector {
   position: absolute;
   inset: 0;
@@ -2678,18 +4123,10 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 
-.venue-tab-clip {
-  position: absolute;
-  height: 88px;
-  overflow: hidden;
-  pointer-events: none;
-  transform: translateY(-50%);
-}
-
 .venue-float-button {
   --venue-rotation: 0deg;
+  --venue-shift-x: 0%;
   position: absolute;
-  top: 50%;
   display: flex;
   align-items: center;
   min-width: 142px;
@@ -2714,7 +4151,7 @@ onBeforeUnmount(() => {
   cursor: pointer;
   pointer-events: auto;
   backdrop-filter: blur(8px);
-  transform: translateY(-50%) rotate(var(--venue-rotation));
+  transform: translate(var(--venue-shift-x), -50%) rotate(var(--venue-rotation));
   transition:
     color 180ms ease,
     border-color 180ms ease,
@@ -2729,7 +4166,7 @@ onBeforeUnmount(() => {
   box-shadow:
     0 13px 28px rgba(60, 55, 39, 0.2),
     inset 0 1px rgba(255, 255, 255, 0.78);
-  transform: translateY(calc(-50% - 3px)) rotate(var(--venue-rotation)) scale(1.035);
+  transform: translate(var(--venue-shift-x), calc(-50% - 3px)) rotate(var(--venue-rotation)) scale(1.035);
 }
 
 .venue-float-button.active {
@@ -2757,52 +4194,52 @@ onBeforeUnmount(() => {
   background: #e6d29f;
 }
 
-.venue-tab-clip.left .venue-float-button {
-  right: -14px;
+.venue-float-button:nth-child(odd) {
+  --venue-shift-x: -100%;
   flex-direction: row-reverse;
   justify-content: flex-start;
   border-radius: 15px 4px 4px 15px;
   text-align: right;
 }
 
-.venue-tab-clip.right .venue-float-button {
-  left: -14px;
+.venue-float-button:nth-child(even) {
+  --venue-shift-x: 0%;
   border-radius: 4px 15px 15px 4px;
 }
 
-.venue-tab-clip:nth-child(1) .venue-float-button {
+.venue-float-button:nth-child(1) {
   --venue-rotation: -2deg;
 }
 
-.venue-tab-clip:nth-child(2) .venue-float-button {
+.venue-float-button:nth-child(2) {
   --venue-rotation: 2deg;
 }
 
-.venue-tab-clip:nth-child(3) .venue-float-button {
+.venue-float-button:nth-child(3) {
   --venue-rotation: 1.5deg;
 }
 
-.venue-tab-clip:nth-child(4) .venue-float-button {
+.venue-float-button:nth-child(4) {
   --venue-rotation: -2.5deg;
 }
 
-.venue-tab-clip:nth-child(5) .venue-float-button {
+.venue-float-button:nth-child(5) {
   --venue-rotation: -1deg;
 }
 
-.venue-tab-clip:nth-child(6) .venue-float-button {
+.venue-float-button:nth-child(6) {
   --venue-rotation: 2deg;
 }
 
-.venue-tab-clip:nth-child(7) .venue-float-button {
+.venue-float-button:nth-child(7) {
   --venue-rotation: 2.5deg;
 }
 
-.venue-tab-clip:nth-child(8) .venue-float-button {
+.venue-float-button:nth-child(8) {
   --venue-rotation: -1.5deg;
 }
 
-.venue-tab-clip:nth-child(9) .venue-float-button {
+.venue-float-button:nth-child(9) {
   --venue-rotation: -2deg;
 }
 
@@ -2820,7 +4257,7 @@ onBeforeUnmount(() => {
   from {
     opacity: 0;
     filter: blur(5px);
-    transform: translateY(-35%) rotate(var(--venue-rotation)) scale(0.82);
+    transform: translate(var(--venue-shift-x), -35%) rotate(var(--venue-rotation)) scale(0.82);
   }
 }
 
@@ -2919,17 +4356,8 @@ onBeforeUnmount(() => {
     display: none;
   }
 
-  .venue-tab-clip,
-  .venue-tab-clip:nth-child(n) {
-    position: static;
-    width: auto !important;
-    height: auto;
-    overflow: visible;
-    transform: none;
-  }
-
   .venue-float-button,
-  .venue-tab-clip:nth-child(n) .venue-float-button {
+  .venue-float-button:nth-child(n) {
     position: static;
     flex: 0 0 auto;
     max-width: none;
