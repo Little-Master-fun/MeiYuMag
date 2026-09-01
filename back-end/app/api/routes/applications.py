@@ -14,11 +14,13 @@ from app.models.auth_profile import AuthProfile
 from app.models.user import User
 from app.models.venue import ReservationCalendar
 from app.schemas.application import (
+    AiPreReviewResult,
     ApplicationRead,
     ApplicationPreReviewResponse,
     ConflictItem,
     ApplicationFileRead,
     GenericFileUploadResponse,
+    GenericFilesUploadResponse,
     ReviewIssue,
     SignedFilesSubmitResponse,
     UploadedSignedFile,
@@ -106,6 +108,78 @@ def summarize_review_problems(
     return "\n".join(lines)
 
 
+async def evaluate_pre_review(
+    db: AsyncSession,
+    application_type: str,
+    venue_id: int,
+    file: UploadFile,
+    ignored_application_id: int | None = None,
+) -> tuple[AiPreReviewResult, list[ReviewIssue], list[ConflictItem], bool]:
+    ai_result = await ai_review_service.pre_review_word(application_type, file)
+    issues = list(ai_result.issues)
+    conflicts: list[ConflictItem] = []
+    if not ai_result.extracted_time_slots:
+        issues.append(
+            ReviewIssue(
+                type="MISSING_TIME_SLOT",
+                message="AI 未能从申请材料中提取出借用日期和具体时间段",
+            )
+        )
+
+    for slot in ai_result.extracted_time_slots:
+        if slot.start_at is None or slot.end_at is None:
+            issues.append(
+                ReviewIssue(
+                    type="INVALID_TIME_SLOT",
+                    message=f"无法解析借用时间：{slot.date} {slot.start_time}-{slot.end_time}",
+                )
+            )
+            continue
+
+        conditions = [
+            ReservationCalendar.venue_id == venue_id,
+            ReservationCalendar.status.in_(["pre_reserved", "confirmed", "reserved"]),
+            ReservationCalendar.start_at < slot.end_at,
+            ReservationCalendar.end_at > slot.start_at,
+        ]
+        if ignored_application_id is not None:
+            conditions.append(ReservationCalendar.application_id != ignored_application_id)
+        result = await db.execute(select(ReservationCalendar).where(and_(*conditions)))
+        for reservation in result.scalars():
+            conflicts.append(
+                ConflictItem(
+                    venue_id=venue_id,
+                    application_id=reservation.application_id,
+                    start_at=reservation.start_at,
+                    end_at=reservation.end_at,
+                    status=reservation.status,
+                    message="申请时间与已有预约冲突",
+                )
+            )
+
+    passed = ai_result.passed and not issues and not conflicts
+    return ai_result, issues, conflicts, passed
+
+
+async def application_read_with_review_reason(
+    db: AsyncSession,
+    application: Application,
+) -> ApplicationRead:
+    result = await db.execute(
+        select(ApplicationFile)
+        .where(
+            ApplicationFile.application_id == application.id,
+            ApplicationFile.file_type == "pre_review_word",
+        )
+        .order_by(ApplicationFile.version.desc())
+    )
+    latest_file = result.scalars().first()
+    review_reason = latest_file.reject_reason if latest_file is not None else None
+    return ApplicationRead.model_validate(application).model_copy(
+        update={"review_reason": review_reason}
+    )
+
+
 @router.get("", response_model=list[ApplicationRead])
 async def list_my_applications(
     current_user: Annotated[User, Depends(get_current_user)],
@@ -117,7 +191,10 @@ async def list_my_applications(
         query = query.where(Application.status == status_filter)
     query = query.order_by(Application.created_at.desc())
     result = await db.execute(query)
-    return [ApplicationRead.model_validate(item) for item in result.scalars()]
+    return [
+        await application_read_with_review_reason(db, item)
+        for item in result.scalars()
+    ]
 
 
 async def get_owned_application_or_admin(
@@ -284,6 +361,54 @@ async def upload_application_file(
     )
 
 
+@router.post("/{application_id}/files/batch", response_model=GenericFilesUploadResponse)
+async def upload_application_files_batch(
+    application_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    files: list[UploadFile] = File(...),
+    file_type: str = Form(default="supplement_file"),
+) -> GenericFilesUploadResponse:
+    application = await db.get(Application, application_id)
+    if application is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
+    if application.user_id != current_user.id and current_user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied")
+    if application.status != "supplement_required":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Application is not waiting for supplement files",
+        )
+    if not files:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one supplement file is required",
+        )
+
+    uploaded_files = [
+        await save_application_file(db, application_id, file_type, file)
+        for file in files
+    ]
+    application.status = "pending_admin_submit"
+    await notification_service.notify_admins(
+        db=db,
+        application=application,
+        notification_type="pending_admin_submit",
+        subject="有申请材料待管理员提交",
+        body=(
+            f"用户已批量补交 {len(uploaded_files)} 份申请材料，"
+            "申请进入待管理员提交状态。\n\n"
+            f"{format_application_label(application)}"
+        ),
+    )
+    await db.commit()
+    return GenericFilesUploadResponse(
+        application_id=application.id,
+        status=application.status,
+        uploaded_files=uploaded_files,
+    )
+
+
 @router.post("/{application_id}/signed-files", response_model=SignedFilesSubmitResponse)
 async def submit_signed_files(
     application_id: int,
@@ -381,6 +506,7 @@ async def submit_pre_review(
     application_type: str = Form(...),
     venue_id: int = Form(...),
     file: UploadFile = File(...),
+    additional_files: list[UploadFile] | None = File(default=None),
 ) -> ApplicationPreReviewResponse:
     if not current_user.is_sdu_verified and not current_user.is_application_allowed:
         raise HTTPException(
@@ -400,51 +526,12 @@ async def submit_pre_review(
             detail="Only .docx Word documents are accepted for pre-review",
         )
 
-    ai_result = await ai_review_service.pre_review_word(application_type, file)
-    issues = list(ai_result.issues)
-    conflicts: list[ConflictItem] = []
-    if not ai_result.extracted_time_slots:
-        issues.append(
-            ReviewIssue(
-                type="MISSING_TIME_SLOT",
-                message="AI 未能从申请材料中提取出借用日期和具体时间段",
-            )
-        )
-
-    if ai_result.extracted_time_slots:
-        for slot in ai_result.extracted_time_slots:
-            if slot.start_at is None or slot.end_at is None:
-                issues.append(
-                    ReviewIssue(
-                        type="INVALID_TIME_SLOT",
-                        message=f"无法解析借用时间：{slot.date} {slot.start_time}-{slot.end_time}",
-                    )
-                )
-                continue
-
-            result = await db.execute(
-                select(ReservationCalendar).where(
-                    and_(
-                        ReservationCalendar.venue_id == venue_id,
-                        ReservationCalendar.status.in_(["pre_reserved", "confirmed", "reserved"]),
-                        ReservationCalendar.start_at < slot.end_at,
-                        ReservationCalendar.end_at > slot.start_at,
-                    )
-                )
-            )
-            for reservation in result.scalars():
-                conflicts.append(
-                    ConflictItem(
-                        venue_id=venue_id,
-                        application_id=reservation.application_id,
-                        start_at=reservation.start_at,
-                        end_at=reservation.end_at,
-                        status=reservation.status,
-                        message="申请时间与已有预约冲突",
-                    )
-                )
-
-    passed = ai_result.passed and not issues and not conflicts
+    ai_result, issues, conflicts, passed = await evaluate_pre_review(
+        db,
+        application_type,
+        venue_id,
+        file,
+    )
     application_id: int | None = None
     auth_profile_result = await db.execute(
         select(AuthProfile).where(AuthProfile.user_id == current_user.id)
@@ -464,7 +551,7 @@ async def submit_pre_review(
         applicant_sduid=auth_profile.sduid if auth_profile else None,
         applicant_department=current_user.department,
         venue_id=venue_id,
-        status="pending_signed_files" if passed else "pending_admin_pre_review",
+        status="pending_signed_files" if passed else "ai_rejected",
         start_at=first_slot.start_at if first_slot else None,
         end_at=last_slot.end_at if last_slot else None,
     )
@@ -482,6 +569,13 @@ async def submit_pre_review(
             reject_reason=summarize_review_problems(issues, conflicts) if not passed else None,
         )
     )
+    for additional_file in additional_files or []:
+        await save_application_file(
+            db,
+            application.id,
+            "supporting_material",
+            additional_file,
+        )
     application_id = application.id
 
     if passed:
@@ -509,27 +603,16 @@ async def submit_pre_review(
             ),
         )
     else:
-        for slot in ai_result.extracted_time_slots:
-            if slot.start_at is None or slot.end_at is None:
-                continue
-            db.add(
-                ReservationCalendar(
-                    venue_id=venue_id,
-                    application_id=application.id,
-                    start_at=slot.start_at,
-                    end_at=slot.end_at,
-                    status="pending_admin_pre_review",
-                )
-            )
-        await notification_service.notify_admins(
+        await notification_service.send_and_log(
             db=db,
-            application=application,
-            notification_type="pending_admin_pre_review",
-            subject="有申请需要管理员初审",
+            application_id=application.id,
+            recipients=[current_user.email],
+            notification_type="pre_review_rejected",
+            subject="场地申请初审未通过",
             body=(
-                "AI 初审未通过或存在需要人工确认的问题，申请已进入待管理员初审状态。\n\n"
+                "您的场地申请未通过 AI 初审，请修改申请文件后重新提交。\n\n"
                 f"{format_application_label(application)}\n\n"
-                f"问题摘要：\n{summarize_review_problems(issues, conflicts) or '无'}"
+                f"未通过原因：\n{summarize_review_problems(issues, conflicts) or '材料不符合初审要求'}"
             ),
         )
 
@@ -539,11 +622,152 @@ async def submit_pre_review(
         passed=passed,
         application_type=application_type,
         venue_id=venue_id,
-        next_status="pending_signed_files" if passed else "pending_admin_pre_review",
+        next_status="pending_signed_files" if passed else "ai_rejected",
         extracted_time_slots=ai_result.extracted_time_slots,
         issues=issues,
         conflicts=conflicts,
         application_id=application_id,
         borrow_organization=ai_result.borrow_organization or ai_result.organization,
         purpose_summary=ai_result.purpose_summary,
+    )
+
+
+@router.post("/{application_id}/pre-review", response_model=ApplicationPreReviewResponse)
+async def resubmit_pre_review(
+    application_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    file: UploadFile = File(...),
+    additional_files: list[UploadFile] | None = File(default=None),
+) -> ApplicationPreReviewResponse:
+    application = await db.get(Application, application_id)
+    if application is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
+    if application.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied")
+    if application.status != "ai_rejected":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only AI-rejected applications can be resubmitted",
+        )
+    if application.application_type not in {"meiyu_venue", "yueyuan_third_floor"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This application type does not support AI pre-review",
+        )
+    if application.venue_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Application venue is missing",
+        )
+    if not file.filename or not file.filename.lower().endswith(".docx"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only .docx Word documents are accepted for pre-review",
+        )
+
+    ai_result, issues, conflicts, passed = await evaluate_pre_review(
+        db,
+        application.application_type,
+        application.venue_id,
+        file,
+        ignored_application_id=application.id,
+    )
+    stored_path = await file_storage_service.save_upload(file, "pre-review")
+    version = await next_file_version(db, application.id, "pre_review_word")
+    first_slot = ai_result.extracted_time_slots[0] if ai_result.extracted_time_slots else None
+    last_slot = ai_result.extracted_time_slots[-1] if ai_result.extracted_time_slots else None
+
+    application.organization = (
+        ai_result.borrow_organization
+        or ai_result.organization
+        or application.organization
+        or current_user.department
+    )
+    application.borrow_organization = (
+        ai_result.borrow_organization or ai_result.organization
+    )
+    application.purpose_summary = ai_result.purpose_summary
+    application.start_at = first_slot.start_at if first_slot else None
+    application.end_at = last_slot.end_at if last_slot else None
+    application.status = "pending_signed_files" if passed else "ai_rejected"
+
+    db.add(
+        ApplicationFile(
+            application_id=application.id,
+            file_type="pre_review_word",
+            version=version,
+            original_filename=file.filename or "application.docx",
+            stored_path=stored_path,
+            review_status="passed" if passed else "failed",
+            reject_reason=summarize_review_problems(issues, conflicts) if not passed else None,
+        )
+    )
+    for additional_file in additional_files or []:
+        await save_application_file(
+            db,
+            application.id,
+            "supporting_material",
+            additional_file,
+        )
+
+    existing_reservations = await db.execute(
+        select(ReservationCalendar).where(
+            ReservationCalendar.application_id == application.id,
+            ReservationCalendar.status != "cancelled",
+        )
+    )
+    for reservation in existing_reservations.scalars():
+        reservation.status = "cancelled"
+
+    if passed:
+        for slot in ai_result.extracted_time_slots:
+            if slot.start_at is None or slot.end_at is None:
+                continue
+            db.add(
+                ReservationCalendar(
+                    venue_id=application.venue_id,
+                    application_id=application.id,
+                    start_at=slot.start_at,
+                    end_at=slot.end_at,
+                    status="pre_reserved",
+                )
+            )
+        await notification_service.send_and_log(
+            db=db,
+            application_id=application.id,
+            recipients=[current_user.email],
+            notification_type="pre_review_passed",
+            subject="场地申请重新初审通过",
+            body=(
+                "您重新提交的场地申请已通过 AI 初审，请上传签字盖章版本材料。\n\n"
+                f"{format_application_label(application)}"
+            ),
+        )
+    else:
+        await notification_service.send_and_log(
+            db=db,
+            application_id=application.id,
+            recipients=[current_user.email],
+            notification_type="pre_review_rejected",
+            subject="场地申请重新初审未通过",
+            body=(
+                "您重新提交的场地申请仍未通过 AI 初审，请根据原因继续修改。\n\n"
+                f"{format_application_label(application)}\n\n"
+                f"未通过原因：\n{summarize_review_problems(issues, conflicts) or '材料不符合初审要求'}"
+            ),
+        )
+
+    await db.commit()
+    return ApplicationPreReviewResponse(
+        passed=passed,
+        application_type=application.application_type,
+        venue_id=application.venue_id,
+        next_status=application.status,
+        extracted_time_slots=ai_result.extracted_time_slots,
+        issues=issues,
+        conflicts=conflicts,
+        application_id=application.id,
+        borrow_organization=application.borrow_organization,
+        purpose_summary=application.purpose_summary,
     )

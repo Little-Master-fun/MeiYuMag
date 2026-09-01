@@ -39,6 +39,7 @@ export interface PersonalApplicationItem {
   status: string
   startAt: string | null
   endAt: string | null
+  reviewReason: string | null
   createdAt: string
 }
 
@@ -56,6 +57,7 @@ export interface VenueUsageBoard {
 
 export type ParchmentPageAction =
   | { type: 'switch-page'; page: 'profile' | 'calendar' }
+  | { type: 'resubmit'; application: PersonalApplicationItem }
   | { type: 'supplement'; application: PersonalApplicationItem }
 
 export interface ParchmentPageCanvas {
@@ -87,7 +89,7 @@ const DETAIL_CALENDAR_COLUMNS = 7
 const DETAIL_CELL_WIDTH = DETAIL_TABLE_WIDTH / DETAIL_CALENDAR_COLUMNS
 
 function isHistoricalApplicationStatus(status: string) {
-  return ['completed', 'cancelled', 'rejected', 'ai_rejected'].includes(status)
+  return ['completed', 'cancelled', 'rejected'].includes(status)
 }
 
 const statusStyles: Record<string, { label: string; color: string; text: string }> = {
@@ -915,11 +917,12 @@ function drawPersonalApplicationRow(
 ) {
   const height = compact ? 76 : 96
   roundedRect(ctx, 120, y, 784, height, 17)
-  ctx.fillStyle = application.status === 'supplement_required'
+  const needsUserAction = ['supplement_required', 'ai_rejected'].includes(application.status)
+  ctx.fillStyle = needsUserAction
     ? 'rgba(154, 97, 82, 0.09)'
     : 'rgba(255, 252, 239, 0.22)'
   ctx.fill()
-  ctx.strokeStyle = application.status === 'supplement_required'
+  ctx.strokeStyle = needsUserAction
     ? 'rgba(154, 97, 82, 0.32)'
     : 'rgba(92, 72, 47, 0.14)'
   ctx.lineWidth = 2
@@ -933,21 +936,29 @@ function drawPersonalApplicationRow(
   ctx.fillText(application.venueName || '场地申请', 146, y + (compact ? 33 : 38))
   ctx.fillStyle = 'rgba(77, 60, 40, 0.55)'
   ctx.font = `${compact ? 17 : 19}px "Songti SC", "STSong", serif`
-  const purpose = application.purpose || '申请内容待补充'
+  const purpose = application.status === 'ai_rejected'
+    ? `未通过原因：${application.reviewReason || '申请材料未满足初审要求'}`
+    : application.purpose || '申请内容待补充'
   ctx.fillText(
-    `${formatCompactDate(application.startAt || application.createdAt)} · ${purpose.length > 22 ? `${purpose.slice(0, 22)}…` : purpose}`,
+    application.status === 'ai_rejected'
+      ? (purpose.length > 31 ? `${purpose.slice(0, 31)}…` : purpose)
+      : `${formatCompactDate(application.startAt || application.createdAt)} · ${purpose.length > 22 ? `${purpose.slice(0, 22)}…` : purpose}`,
     146,
     y + (compact ? 60 : 73),
   )
 
-  if (application.status === 'supplement_required') {
+  if (needsUserAction) {
     roundedRect(ctx, 720, y + 24, 154, 50, 14)
     ctx.fillStyle = '#93604f'
     ctx.fill()
     ctx.textAlign = 'center'
     ctx.fillStyle = '#fbf2dc'
     ctx.font = '600 19px "Songti SC", "STSong", serif'
-    ctx.fillText('补交材料  →', 797, y + 56)
+    ctx.fillText(
+      application.status === 'ai_rejected' ? '重新提交  →' : '补交材料  →',
+      797,
+      y + 56,
+    )
   } else {
     ctx.fillStyle = style.color
     roundedRect(ctx, 742, y + (compact ? 20 : 28), 132, 38, 12)
@@ -1008,8 +1019,8 @@ function drawPersonalHomeBoard(
 
   const profile = board.profile
   const groups = getPersonalApplicationGroups(board)
-  const supplementCount = (board.applications ?? []).filter(
-    (application) => application.status === 'supplement_required',
+  const actionRequiredCount = (board.applications ?? []).filter(
+    (application) => ['supplement_required', 'ai_rejected'].includes(application.status),
   ).length
   roundedRect(ctx, 120, 430, 784, 132, 22)
   ctx.fillStyle = 'rgba(255, 252, 239, 0.26)'
@@ -1041,7 +1052,7 @@ function drawPersonalHomeBoard(
 
   drawStat(ctx, 120, board.applications?.length ?? 0, '全部申请', 590)
   drawStat(ctx, 393, groups.active.length, '进行中', 590)
-  drawStat(ctx, 666, supplementCount, '待补交', 590)
+  drawStat(ctx, 666, actionRequiredCount, '待处理', 590)
 
   let cursorY = 760
   ctx.textAlign = 'left'
@@ -1412,12 +1423,15 @@ export function createParchmentPageCanvas(maxAnisotropy: number): ParchmentPageC
       const application = active[index]
       const rowY = firstRowY + index * 112
       if (
-        application?.status === 'supplement_required'
+        ['supplement_required', 'ai_rejected'].includes(application?.status ?? '')
         && canvasX >= 120
         && canvasX <= 904
         && contentY >= rowY
         && contentY <= rowY + 96
       ) {
+        if (application?.status === 'ai_rejected') {
+          return { type: 'resubmit', application }
+        }
         return { type: 'supplement', application }
       }
     }

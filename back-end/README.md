@@ -253,6 +253,7 @@ Form fields:
 application_type=meiyu_venue | yueyuan_third_floor
 venue_id=1
 file=<.docx Word document>
+additional_files=<optional supporting document, repeatable>
 ```
 
 Flow:
@@ -264,10 +265,21 @@ Upload Word document
 -> AI extracts structured venue/time/application info
 -> backend checks time conflicts against ReservationCalendar
 -> if passed, backend creates Application, stores the Word file, and writes pre_reserved calendar records
+-> if rejected, backend stores the reason with status ai_rejected and does not occupy the calendar
 -> backend returns extracted times, issues, conflicts, next_status, and application_id
 ```
 
-AI only extracts and checks document rules. Time conflict checking is always performed by the backend.
+AI performs the initial document review. Time conflict checking is always performed by the backend.
+An AI-rejected application does not wait for manual pre-review. The user can read
+`review_reason` from the application list and resubmit a corrected Word file:
+
+```text
+POST /api/v1/applications/{application_id}/pre-review
+file=<corrected .docx Word document>
+additional_files=<optional supporting document, repeatable>
+```
+
+Every resubmission creates a new `pre_review_word` file version.
 
 When pre-review passes, the application stores a snapshot of:
 
@@ -351,6 +363,16 @@ file=<supplement file>
 
 This endpoint is only available when the application status is `supplement_required`.
 
+The staged multi-file frontend confirms all supplement files with one atomic request:
+
+```text
+POST /api/v1/applications/{application_id}/files/batch
+file_type=supplement_file
+files=<supplement file, repeatable>
+```
+
+The application status changes only after every file in the batch has been saved.
+
 Application file list and download:
 
 ```text
@@ -411,7 +433,7 @@ cancelled
 rejected
 ```
 
-Handle applications waiting for admin pre-review:
+Legacy manual handling for applications already waiting for admin pre-review:
 
 ```text
 POST /api/v1/admin/applications/{application_id}/pre-review-decision

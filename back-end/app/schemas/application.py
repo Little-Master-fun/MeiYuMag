@@ -65,6 +65,7 @@ class ApplicationRead(BaseModel):
     status: str
     start_at: datetime | None
     end_at: datetime | None
+    review_reason: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -115,6 +116,12 @@ class GenericFileUploadResponse(BaseModel):
     application_id: int
     status: str
     uploaded_file: UploadedSignedFile
+
+
+class GenericFilesUploadResponse(BaseModel):
+    application_id: int
+    status: str
+    uploaded_files: list[UploadedSignedFile]
 
 
 class AdminApplicationStatusUpdate(BaseModel):

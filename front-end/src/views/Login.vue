@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import axios from 'axios'
 import * as THREE from 'three'
 import { gsap } from 'gsap'
@@ -11,6 +11,7 @@ import {
   Building2,
   Eye,
   EyeOff,
+  FileText,
   LockKeyhole,
   Mail,
   RefreshCw,
@@ -76,6 +77,7 @@ const submissionNoticeVisible = ref(false)
 const submissionNoticeMessage = ref('')
 const submissionNoticeMode = ref<'uploading' | 'success' | 'error'>('uploading')
 const applicationTabLoading = ref(false)
+const submissionFilesUploading = ref(false)
 
 const auth = useAuthStore()
 
@@ -112,6 +114,7 @@ interface PersonalApplicationApi {
   status: string
   start_at: string | null
   end_at: string | null
+  review_reason: string | null
   created_at: string
 }
 
@@ -127,6 +130,9 @@ let model: THREE.Object3D | null = null
 let houseModel: THREE.Object3D | null = null
 let clipboardModel: THREE.Object3D | null = null
 let mailboxModel: THREE.Object3D | null = null
+let submissionSignModel: THREE.Group | null = null
+let submissionSignTween: gsap.core.Tween | null = null
+let submissionSignTargetY = 0
 let resizeObserver: ResizeObserver | null = null
 let animationFrame = 0
 let smsCountdownTimer: ReturnType<typeof setInterval> | null = null
@@ -184,9 +190,66 @@ interface ApplicationNavigationTarget {
   venueId: number
   venueName: string
   date: string
-  mode?: 'new' | 'supplement'
+  mode?: 'new' | 'resubmit' | 'supplement'
   applicationId?: number
 }
+
+interface StagedSubmissionFile {
+  id: string
+  file: File
+}
+
+const submissionContext = ref<ApplicationNavigationTarget | null>(null)
+const pendingSubmissionFiles = ref<StagedSubmissionFile[]>([])
+const submissionGuide = computed(() => {
+  const target = submissionContext.value
+  if (!target) return null
+
+  if (target.mode === 'resubmit') {
+    return {
+      kicker: 'AI REVIEW · RETRY',
+      step: '重新提交',
+      title: '修正后重新初审',
+      requirements: [
+        { label: '修改后的场地申请表', extension: '.docx', kind: 'primary' as const },
+      ],
+      description: '新文件会保存为当前申请的新版本，并立即重新进入 AI 初审。',
+    }
+  }
+
+  if (target.mode === 'supplement') {
+    return {
+      kicker: 'APPLICATION · SUPPLEMENT',
+      step: '补交材料',
+      title: '补充申请材料',
+      requirements: [
+        { label: '管理员指定的补交材料', extension: '文档 / 图片', kind: 'any' as const },
+      ],
+      description: '材料送达后，申请会回到管理员审核流程继续处理。',
+    }
+  }
+
+  return {
+    kicker: 'AI REVIEW · FIRST SUBMISSION',
+    step: 'AI 初审',
+    title: '提交场地申请',
+    requirements: [
+      { label: '场地申请表', extension: '.docx', kind: 'primary' as const },
+      { label: '证明或说明材料', extension: '可选 · 可多份', kind: 'optional' as const },
+    ],
+    description: '系统将读取申请信息、使用时间，并自动检查场地占用冲突。',
+  }
+})
+const submissionHasPrimaryFile = computed(() =>
+  pendingSubmissionFiles.value.some(({ file }) => file.name.toLowerCase().endsWith('.docx')),
+)
+const submissionRequirementsSatisfied = computed(() => {
+  if (!submissionContext.value || pendingSubmissionFiles.value.length === 0) return false
+  return submissionContext.value.mode === 'supplement' || submissionHasPrimaryFile.value
+})
+const submissionCacheSize = computed(() =>
+  pendingSubmissionFiles.value.reduce((total, item) => total + item.file.size, 0),
+)
 
 interface ApplicationFlight {
   startPosition: THREE.Vector3
@@ -387,6 +450,14 @@ const submissionEnvelopeActions = {
   },
   previewReturn: () => hideSubmissionEnvelope(),
   printCurrent: () => printSubmissionEnvelopeParameters(),
+}
+
+const submissionSignDebug = {
+  maxWidthPx: 850,
+  sideInsetPx: 48,
+  heightRatio: 0.28,
+  z: -0.2,
+  topInsetPx: 22,
 }
 
 const pushedTreeDebug = {
@@ -743,8 +814,72 @@ function isPointerOverSubmissionEnvelope(clientX: number, clientY: number) {
 }
 
 function openSubmissionFilePicker() {
-  if (!['ready', 'drag', 'error'].includes(submissionEnvelopeState)) return
+  if (
+    submissionFilesUploading.value
+    || !['ready', 'drag', 'error'].includes(submissionEnvelopeState)
+  ) return
   applicationFileInput.value?.click()
+}
+
+function getSubmissionFileExtension(filename: string) {
+  const dotIndex = filename.lastIndexOf('.')
+  return dotIndex >= 0 ? filename.slice(dotIndex).toLowerCase() : ''
+}
+
+function formatSubmissionFileSize(size: number) {
+  if (size === 0) return '0 KB'
+  if (size < 1024 * 1024) return `${Math.max(1, Math.round(size / 1024))} KB`
+  return `${(size / 1024 / 1024).toFixed(size >= 10 * 1024 * 1024 ? 0 : 1)} MB`
+}
+
+function stageSubmissionFiles(files: File[]) {
+  if (submissionFilesUploading.value || files.length === 0) return
+  const allowedExtensions = new Set(['.doc', '.docx', '.pdf', '.jpg', '.jpeg', '.png'])
+  const existing = new Set(
+    pendingSubmissionFiles.value.map(({ file }) => `${file.name}:${file.size}:${file.lastModified}`),
+  )
+  const accepted: StagedSubmissionFile[] = []
+
+  for (const file of files) {
+    const identity = `${file.name}:${file.size}:${file.lastModified}`
+    if (existing.has(identity)) continue
+    const extension = getSubmissionFileExtension(file.name)
+    if (!allowedExtensions.has(extension)) {
+      showSubmissionNotice('error', `“${file.name}”的格式暂不支持`, 3600)
+      continue
+    }
+    if (file.size > 30 * 1024 * 1024) {
+      showSubmissionNotice('error', `“${file.name}”超过 30MB`, 3600)
+      continue
+    }
+    if (pendingSubmissionFiles.value.length + accepted.length >= 10) {
+      showSubmissionNotice('error', '一次最多暂存 10 个文件', 3600)
+      break
+    }
+    existing.add(identity)
+    accepted.push({
+      id: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
+      file,
+    })
+  }
+
+  if (!accepted.length) return
+  pendingSubmissionFiles.value = [...pendingSubmissionFiles.value, ...accepted]
+  setSubmissionEnvelopeState(
+    'ready',
+    `已暂存 ${pendingSubmissionFiles.value.length} 个文件，等待确认`,
+  )
+}
+
+function removeStagedSubmissionFile(id: string) {
+  if (submissionFilesUploading.value) return
+  pendingSubmissionFiles.value = pendingSubmissionFiles.value.filter((item) => item.id !== id)
+  setSubmissionEnvelopeState(
+    'ready',
+    pendingSubmissionFiles.value.length
+      ? `已暂存 ${pendingSubmissionFiles.value.length} 个文件，等待确认`
+      : '点击信封或拖入文件，先暂存后提交',
+  )
 }
 
 function getSubmissionErrorMessage(error: unknown) {
@@ -760,53 +895,87 @@ function getSubmissionErrorMessage(error: unknown) {
   return error.message || '文件提交失败，请稍后重试'
 }
 
-async function submitApplicationFile(file: File) {
+async function submitStagedApplicationFiles() {
   const target = selectedApplicationTarget
   if (
     !target
-    || submissionEnvelopeState === 'uploading'
+    || submissionFilesUploading.value
     || (target.mode !== 'supplement' && target.venueId <= 0)
   ) return
-  if (!file.name.toLowerCase().endsWith('.docx')) {
-    const message = '目前仅支持 .docx Word 申请材料'
-    setSubmissionEnvelopeState('error', message, file.name)
+  if (['resubmit', 'supplement'].includes(target.mode ?? '') && !target.applicationId) {
+    showSubmissionNotice('error', '当前申请信息不完整，请返回个人首页后重试', 3800)
+    return
+  }
+  if (!pendingSubmissionFiles.value.length) {
+    const message = '请先将需要提交的文件放入信封'
+    setSubmissionEnvelopeState('error', message)
     showSubmissionNotice('error', message, 3800)
     return
   }
-  if (file.size > 30 * 1024 * 1024) {
-    const message = '文件不能超过 30MB'
-    setSubmissionEnvelopeState('error', message, file.name)
+  const primaryItem = pendingSubmissionFiles.value.find(({ file }) =>
+    file.name.toLowerCase().endsWith('.docx'),
+  )
+  if (target.mode !== 'supplement' && !primaryItem) {
+    const message = 'AI 初审需要一份 .docx 格式的场地申请表'
+    setSubmissionEnvelopeState('error', message)
     showSubmissionNotice('error', message, 3800)
     return
   }
 
-  setSubmissionEnvelopeState('uploading', '正在进行材料初审，请稍候', file.name)
+  submissionFilesUploading.value = true
+  const fileCount = pendingSubmissionFiles.value.length
+  setSubmissionEnvelopeState('uploading', `正在送出 ${fileCount} 个文件，请稍候`)
   showSubmissionNotice(
     'uploading',
     target.mode === 'supplement'
-      ? `正在上传补交材料“${file.name}”`
-      : `正在上传“${file.name}”并进行材料初审`,
+      ? `正在上传 ${fileCount} 份补交材料`
+      : target.mode === 'resubmit'
+        ? `正在重新提交 ${fileCount} 个文件并进行 AI 初审`
+      : `正在提交 ${fileCount} 个文件并进行材料初审`,
   )
-  const formData = new FormData()
-  formData.append('file', file)
 
   try {
-    let successMessage = '文件已送达，等待管理员初审'
+    let resultMode: 'success' | 'error' = 'success'
+    let successMessage = '文件已送达'
     if (target.mode === 'supplement' && target.applicationId) {
+      const formData = new FormData()
+      pendingSubmissionFiles.value.forEach(({ file }) => formData.append('files', file))
       formData.append('file_type', 'supplement_file')
-      await axios.post(`/api/v1/applications/${target.applicationId}/files`, formData)
-      successMessage = '补交材料已送达，申请重新进入审核流程'
+      await axios.post(`/api/v1/applications/${target.applicationId}/files/batch`, formData)
+      successMessage = `${fileCount} 份补交材料已送达，申请重新进入审核流程`
+    } else if (target.mode === 'resubmit' && target.applicationId) {
+      const formData = new FormData()
+      formData.append('file', primaryItem!.file)
+      pendingSubmissionFiles.value
+        .filter((item) => item.id !== primaryItem!.id)
+        .forEach(({ file }) => formData.append('additional_files', file))
+      const { data } = await axios.post(
+        `/api/v1/applications/${target.applicationId}/pre-review`,
+        formData,
+      )
+      resultMode = data?.passed ? 'success' : 'error'
+      successMessage = data?.passed
+        ? '重新初审通过，申请已预占用'
+        : '重新初审未通过，请在个人首页查看原因'
     } else {
+      const formData = new FormData()
+      formData.append('file', primaryItem!.file)
+      pendingSubmissionFiles.value
+        .filter((item) => item.id !== primaryItem!.id)
+        .forEach(({ file }) => formData.append('additional_files', file))
       formData.append(
         'application_type',
         target.venueName.includes('悦园三楼') ? 'yueyuan_third_floor' : 'meiyu_venue',
       )
       formData.append('venue_id', String(target.venueId))
       const { data } = await axios.post('/api/v1/applications/pre-review', formData)
-      successMessage = data?.passed ? '初审通过，申请已预占用' : successMessage
+      resultMode = data?.passed ? 'success' : 'error'
+      successMessage = data?.passed
+        ? '初审通过，申请已预占用'
+        : '初审未通过，请在个人首页查看原因并重新提交'
     }
-    setSubmissionEnvelopeState('success', successMessage, file.name)
-    showSubmissionNotice('success', successMessage, 3800)
+    setSubmissionEnvelopeState(resultMode, successMessage)
+    showSubmissionNotice(resultMode, successMessage, 4200)
     void loadPersonalHome()
     void loadVenueUsageBoard()
     submissionEnvelopeReturnTimer = setTimeout(() => {
@@ -814,17 +983,18 @@ async function submitApplicationFile(file: File) {
       hideSubmissionEnvelope(() => playPostLoginCamera())
     }, Math.max(submissionEnvelopeDebug.successHold, 0) * 1000)
   } catch (error) {
+    submissionFilesUploading.value = false
     const message = getSubmissionErrorMessage(error)
-    setSubmissionEnvelopeState('error', message, file.name)
+    setSubmissionEnvelopeState('error', message)
     showSubmissionNotice('error', message, 3800)
   }
 }
 
 function handleApplicationFileChange(event: Event) {
   const input = event.currentTarget as HTMLInputElement
-  const file = input.files?.[0]
+  const files = Array.from(input.files ?? [])
   input.value = ''
-  if (file) void submitApplicationFile(file)
+  stageSubmissionFiles(files)
 }
 
 function handleSubmissionDragOver(event: DragEvent) {
@@ -834,7 +1004,7 @@ function handleSubmissionDragOver(event: DragEvent) {
   }
   event.preventDefault()
   if (submissionEnvelopeState === 'ready' || submissionEnvelopeState === 'error') {
-    setSubmissionEnvelopeState('drag', '松开即可递交 Word 申请材料')
+    setSubmissionEnvelopeState('drag', '松开即可将文件暂存在信封中')
   }
 }
 
@@ -847,8 +1017,7 @@ function handleSubmissionDrop(event: DragEvent) {
   if (!isPointerOverSubmissionEnvelope(event.clientX, event.clientY)) return
   event.preventDefault()
   event.stopPropagation()
-  const file = event.dataTransfer?.files?.[0]
-  if (file) void submitApplicationFile(file)
+  stageSubmissionFiles(Array.from(event.dataTransfer?.files ?? []))
 }
 
 function setupRaccoonPushedTree(root: THREE.Object3D) {
@@ -1112,6 +1281,134 @@ function prepareMailboxModel(source: THREE.Object3D) {
   wrapper.name = 'Stylized_Mailbox'
   wrapper.add(normalizedGroup)
   return wrapper
+}
+
+function prepareSubmissionSignModel(source: THREE.Object3D) {
+  source.traverse((child) => {
+    if (!(child instanceof THREE.Mesh)) return
+    child.castShadow = false
+    child.receiveShadow = false
+    child.frustumCulled = false
+    child.renderOrder = 80
+
+    const materials = Array.isArray(child.material) ? child.material : [child.material]
+    for (const material of materials) {
+      material.transparent = false
+      material.opacity = 1
+      material.alphaTest = 0
+      // The sign is attached to the camera as a 3D interface element. Disable
+      // scene depth testing so nearby house geometry cannot cut holes through
+      // the board while keeping its own modeled thickness and lighting.
+      material.depthTest = false
+      material.depthWrite = false
+      material.side = THREE.DoubleSide
+
+      if (material instanceof THREE.MeshStandardMaterial) {
+        material.metalness = 0
+        material.roughness = 1
+        material.normalScale.set(0.22, 0.22)
+        material.envMapIntensity = 0.12
+        if (material instanceof THREE.MeshPhysicalMaterial) {
+          material.specularIntensity = 0.08
+        }
+      }
+      material.needsUpdate = true
+    }
+  })
+
+  const bounds = new THREE.Box3().setFromObject(source)
+  const center = bounds.getCenter(new THREE.Vector3())
+  const size = bounds.getSize(new THREE.Vector3())
+  source.position.sub(center)
+
+  const normalized = new THREE.Group()
+  normalized.name = 'Submission_Sign_Normalized'
+  normalized.scale.setScalar(1 / Math.max(size.x, 0.0001))
+  normalized.add(source)
+
+  const wrapper = new THREE.Group()
+  wrapper.name = 'Submission_Hanging_Sign'
+  wrapper.visible = false
+  wrapper.add(normalized)
+  return wrapper
+}
+
+function updateSubmissionSignLayout() {
+  if (!submissionSignModel || !camera || !viewport.value) return
+
+  const depth = Math.abs(submissionSignDebug.z)
+  const viewHeight = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * depth
+  const worldPerPixel = viewHeight / viewport.value.clientHeight
+  const signWidthPx = Math.min(
+    submissionSignDebug.maxWidthPx,
+    viewport.value.clientWidth - submissionSignDebug.sideInsetPx * 2,
+  )
+  const signWidth = Math.max(signWidthPx, 120) * worldPerPixel
+  const signHeightScale = signWidth * submissionSignDebug.heightRatio
+
+  submissionSignModel.scale.set(signWidth, signHeightScale, signWidth)
+  // The downloaded sign has a tall rope section above its board. Raising the
+  // whole object lets the rope enter from beyond the viewport while the actual
+  // board sits directly behind the DOM copy at the top of the page.
+  const boardTopInNormalizedModel = 0.0527
+  submissionSignTargetY =
+    viewHeight / 2
+    - submissionSignDebug.topInsetPx * worldPerPixel
+    - boardTopInNormalizedModel * signHeightScale
+  submissionSignModel.position.x = 0
+  submissionSignModel.position.z = submissionSignDebug.z
+  if (!submissionSignTween?.isActive()) submissionSignModel.position.y = submissionSignTargetY
+}
+
+function showSubmissionSign() {
+  if (!submissionSignModel) return
+  submissionSignTween?.kill()
+  updateSubmissionSignLayout()
+  submissionSignModel.visible = true
+  submissionSignModel.rotation.set(0, 0, THREE.MathUtils.degToRad(-0.9))
+
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    submissionSignModel.position.y = submissionSignTargetY
+    submissionSignModel.rotation.z = 0
+    return
+  }
+
+  submissionSignModel.position.y = submissionSignTargetY + 0.035
+  submissionSignTween = gsap.to(submissionSignModel.position, {
+    y: submissionSignTargetY,
+    duration: 0.82,
+    ease: 'back.out(1.25)',
+    onUpdate: () => {
+      if (!submissionSignModel) return
+      const remaining = Math.abs(submissionSignModel.position.y - submissionSignTargetY)
+      submissionSignModel.rotation.z = THREE.MathUtils.clamp(remaining * -0.32, -0.018, 0)
+    },
+    onComplete: () => {
+      if (submissionSignModel) submissionSignModel.rotation.z = 0
+      submissionSignTween = null
+    },
+  })
+}
+
+function hideSubmissionSign(immediate = false) {
+  if (!submissionSignModel) return
+  submissionSignTween?.kill()
+  submissionSignTween = null
+
+  if (immediate || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    submissionSignModel.visible = false
+    return
+  }
+
+  submissionSignTween = gsap.to(submissionSignModel.position, {
+    y: submissionSignTargetY + 0.035,
+    duration: 0.42,
+    ease: 'power2.in',
+    onComplete: () => {
+      if (submissionSignModel) submissionSignModel.visible = false
+      submissionSignTween = null
+    },
+  })
 }
 
 function printMailboxParameters() {
@@ -1520,8 +1817,12 @@ function playCameraEntrance() {
   postLoginFlight = null
   applicationFlight = null
   selectedApplicationTarget = null
+  submissionContext.value = null
+  pendingSubmissionFiles.value = []
+  submissionFilesUploading.value = false
   applicationStageActive.value = false
   resetSubmissionEnvelope()
+  hideSubmissionSign(true)
 
   startCameraTarget.set(
     cameraDebug.startTargetX,
@@ -1572,8 +1873,12 @@ function playPostLoginCamera() {
   cameraFlight = null
   applicationFlight = null
   selectedApplicationTarget = null
+  submissionContext.value = null
+  pendingSubmissionFiles.value = []
+  submissionFilesUploading.value = false
   applicationStageActive.value = false
   resetSubmissionEnvelope()
+  hideSubmissionSign()
   loginPanelVisible.value = false
   controls.enabled = false
   controls.autoRotate = false
@@ -1634,7 +1939,11 @@ function playApplicationCamera(target: ApplicationNavigationTarget) {
   resetSubmissionEnvelope()
   clearSubmissionNotice()
   selectedApplicationTarget = target
+  submissionContext.value = target
+  pendingSubmissionFiles.value = []
+  submissionFilesUploading.value = false
   applicationStageActive.value = true
+  showSubmissionSign()
   controls.enabled = false
   controls.autoRotate = false
   cinematicActive.value = true
@@ -1703,6 +2012,7 @@ function replayApplicationCamera() {
   applicationStageActive.value = false
   cinematicActive.value = false
   resetSubmissionEnvelope()
+  hideSubmissionSign(true)
   camera.position.set(-0.1281, 0.0195, 0.1744)
   controls.target.set(-0.0355, 0.0055, -0.0319)
   camera.lookAt(controls.target)
@@ -1927,6 +2237,7 @@ function resizeRenderer() {
   renderer.setSize(clientWidth, clientHeight, false)
   camera.aspect = clientWidth / clientHeight
   camera.updateProjectionMatrix()
+  updateSubmissionSignLayout()
 }
 
 function isVisibleInScene(object: THREE.Object3D) {
@@ -2062,6 +2373,19 @@ function handlePaperClick(event: PointerEvent) {
   const action = pageContentCanvas.getPageAction(pointer.x, pointer.y)
   if (action?.type === 'switch-page') {
     switchFolderPage(action.page)
+    return
+  }
+  if (action?.type === 'resubmit') {
+    const application = action.application
+    playApplicationCamera({
+      venueId: application.venueId ?? 0,
+      venueName: application.venueName,
+      date: application.startAt
+        ? getLocalDateKey(new Date(application.startAt))
+        : getLocalDateKey(new Date()),
+      mode: 'resubmit',
+      applicationId: application.id,
+    })
     return
   }
   if (action?.type === 'supplement') {
@@ -2399,6 +2723,7 @@ async function loadPersonalHome() {
         status: application.status,
         startAt: application.start_at,
         endAt: application.end_at,
+        reviewReason: application.review_reason,
         createdAt: application.created_at,
       }),
     )
@@ -2675,14 +3000,16 @@ onMounted(() => {
   const houseUrl = `${import.meta.env.BASE_URL}models/forest_house.glb`
   const clipboardUrl = `${import.meta.env.BASE_URL}models/downloaded_clipboard.glb`
   const mailboxUrl = `${import.meta.env.BASE_URL}models/mailbox.glb`
+  const submissionSignUrl = `${import.meta.env.BASE_URL}models/hanging-wooden-sign-themed.glb`
 
   Promise.all([
     loader.loadAsync(houseUrl),
     loader.loadAsync(clipboardUrl),
     loader.loadAsync(mailboxUrl),
+    loader.loadAsync(submissionSignUrl),
   ])
-    .then(([houseGltf, clipboardGltf, mailboxGltf]) => {
-      if (!scene) return
+    .then(([houseGltf, clipboardGltf, mailboxGltf, submissionSignGltf]) => {
+      if (!scene || !camera) return
 
       model = new THREE.Group()
       model.name = 'Login_Scene_Models'
@@ -2691,9 +3018,12 @@ onMounted(() => {
       clipboardModel = clipboardGltf.scene
       clipboardModel.name = 'Wooden_Clipboard'
       mailboxModel = prepareMailboxModel(mailboxGltf.scene)
+      submissionSignModel = prepareSubmissionSignModel(submissionSignGltf.scene)
       applyClipboardTransform()
       applyMailboxTransform()
       model.add(houseModel, clipboardModel, mailboxModel)
+      camera.add(submissionSignModel)
+      updateSubmissionSignLayout()
       registerSubmissionEnvelope(mailboxModel)
 
       const topPageObject = clipboardModel.getObjectByName('Top_Page')
@@ -2793,6 +3123,7 @@ onBeforeUnmount(() => {
   stopSmsCountdown()
   revokeRegistrationCaptcha()
   submissionEnvelopeTween?.kill()
+  submissionSignTween?.kill()
   if (submissionEnvelopeReturnTimer) clearTimeout(submissionEnvelopeReturnTimer)
   if (submissionNoticeTimer) clearTimeout(submissionNoticeTimer)
   pageTurnTimeline?.kill()
@@ -2808,6 +3139,14 @@ onBeforeUnmount(() => {
   renderer?.domElement.removeEventListener('drop', handleSubmissionDrop)
 
   resetSubmissionEnvelope()
+
+  submissionSignModel?.traverse((child) => {
+    if (!(child instanceof THREE.Mesh)) return
+    child.geometry.dispose()
+    if (Array.isArray(child.material)) child.material.forEach(disposeMaterial)
+    else disposeMaterial(child.material)
+  })
+  submissionSignModel?.removeFromParent()
 
   model?.traverse((child) => {
     if (!(child instanceof THREE.Mesh)) return
@@ -2827,6 +3166,8 @@ onBeforeUnmount(() => {
   houseModel = null
   clipboardModel = null
   mailboxModel = null
+  submissionSignModel = null
+  submissionSignTween = null
   topPage = null
   paperSurfaceMesh = null
   paperContentBounds = null
@@ -2863,8 +3204,9 @@ onBeforeUnmount(() => {
       ref="applicationFileInput"
       class="submission-file-input"
       type="file"
-      accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-      aria-label="选择场地申请 Word 文件"
+      accept=".doc,.docx,.pdf,.jpg,.jpeg,.png"
+      multiple
+      aria-label="选择一份或多份申请材料"
       @change="handleApplicationFileChange"
     />
 
@@ -2891,6 +3233,115 @@ onBeforeUnmount(() => {
           </strong>
           <small>{{ submissionNoticeMessage }}</small>
         </span>
+      </aside>
+    </Transition>
+
+    <Transition name="submission-guide">
+      <aside
+        v-if="applicationStageActive && submissionContext && submissionGuide"
+        class="submission-guide"
+        aria-label="当前文件提交说明"
+      >
+        <div class="submission-guide-title">
+          <span class="submission-guide-step">{{ submissionGuide.step }}</span>
+          <span>
+            <small>{{ submissionGuide.kicker }}</small>
+            <strong>{{ submissionGuide.title }}</strong>
+          </span>
+        </div>
+        <div class="submission-guide-context">
+          <span>{{ submissionContext.venueName }}</span>
+          <span>
+            {{ submissionContext.applicationId ? `申请 #${submissionContext.applicationId}` : '新申请' }}
+          </span>
+        </div>
+        <div class="submission-guide-requirements">
+          <div
+            v-for="requirement in submissionGuide.requirements"
+            :key="requirement.label"
+            class="submission-guide-requirement"
+            :class="{
+              fulfilled:
+                requirement.kind === 'optional'
+                  ? pendingSubmissionFiles.length > 1
+                  : requirement.kind === 'any'
+                    ? pendingSubmissionFiles.length > 0
+                    : submissionHasPrimaryFile,
+            }"
+          >
+            <FileText :size="17" :stroke-width="1.55" />
+            <span>
+              <strong>{{ requirement.label }}</strong>
+              <small>{{ requirement.extension }}</small>
+            </span>
+            <i aria-hidden="true" />
+          </div>
+        </div>
+        <p>{{ submissionGuide.description }}</p>
+      </aside>
+    </Transition>
+
+    <Transition name="submission-cache">
+      <aside
+        v-if="applicationStageActive && submissionContext"
+        class="submission-cache-bubble"
+        :class="{ empty: pendingSubmissionFiles.length === 0 }"
+        aria-label="待提交文件缓存"
+      >
+        <span class="submission-cache-tail" aria-hidden="true" />
+        <header>
+          <span>
+            <small>ENVELOPE POCKET</small>
+            <strong>信封里的文件</strong>
+          </span>
+          <em>{{ pendingSubmissionFiles.length }} 份 · {{ formatSubmissionFileSize(submissionCacheSize) }}</em>
+        </header>
+
+        <div v-if="pendingSubmissionFiles.length" class="submission-cache-list">
+          <article
+            v-for="(item, index) in pendingSubmissionFiles"
+            :key="item.id"
+            class="submission-cache-item"
+          >
+            <span class="submission-cache-index">{{ String(index + 1).padStart(2, '0') }}</span>
+            <span class="submission-cache-name">
+              <strong>{{ item.file.name }}</strong>
+              <small>{{ getSubmissionFileExtension(item.file.name) }} · {{ formatSubmissionFileSize(item.file.size) }}</small>
+            </span>
+            <button
+              type="button"
+              :disabled="submissionFilesUploading"
+              :aria-label="`移除 ${item.file.name}`"
+              @click.stop="removeStagedSubmissionFile(item.id)"
+            >
+              ×
+            </button>
+          </article>
+        </div>
+        <p v-else class="submission-cache-empty">
+          信封还是空的<br>
+          <small>点击 3D 信封或将文件拖放进来</small>
+        </p>
+
+        <footer>
+          <button
+            type="button"
+            class="submission-cache-add"
+            :disabled="submissionFilesUploading"
+            @click.stop="openSubmissionFilePicker"
+          >
+            <span aria-hidden="true">＋</span> 继续放入
+          </button>
+          <button
+            type="button"
+            class="submission-cache-submit"
+            :disabled="!submissionRequirementsSatisfied || submissionFilesUploading"
+            @click.stop="submitStagedApplicationFiles"
+          >
+            <span class="submission-cache-seal" aria-hidden="true">✓</span>
+            <span>{{ submissionFilesUploading ? '正在送出' : '封缄并送出' }}</span>
+          </button>
+        </footer>
       </aside>
     </Transition>
 
@@ -3394,6 +3845,450 @@ onBeforeUnmount(() => {
   opacity: 0;
   filter: blur(4px);
   transform: translate(-50%, -16px) scale(0.96);
+}
+
+.submission-guide {
+  position: absolute;
+  top: 30px;
+  left: 50%;
+  z-index: 12;
+  display: grid;
+  grid-template-columns: 1.1fr 0.7fr 1.55fr;
+  gap: 22px;
+  align-items: center;
+  width: min(850px, calc(100vw - 96px));
+  min-height: 104px;
+  padding: 16px 46px 15px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: #fff0c8;
+  pointer-events: none;
+  transform: translateX(-50%) rotate(-0.2deg);
+}
+
+.submission-guide-title {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+}
+
+.submission-guide-title > span:last-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.submission-guide-title small {
+  overflow: hidden;
+  color: rgba(255, 236, 193, 0.62);
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 8px;
+  letter-spacing: 0.12em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.submission-guide-title strong {
+  color: #fff0ca;
+  font-family: 'Songti SC', 'STSong', 'Noto Serif SC', serif;
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-shadow: 0 1px rgba(49, 34, 19, 0.52);
+}
+
+.submission-guide-step {
+  display: grid;
+  flex: 0 0 48px;
+  width: 48px;
+  height: 48px;
+  place-items: center;
+  border: 1px solid rgba(43, 54, 39, 0.7);
+  border-radius: 48% 43% 51% 45%;
+  background: #60735a;
+  color: #fff0cf;
+  font-family: 'Songti SC', 'STSong', serif;
+  font-size: 11px;
+  line-height: 1.15;
+  text-align: center;
+  box-shadow:
+    inset 0 1px rgba(255, 255, 255, 0.13),
+    0 2px 4px rgba(40, 29, 18, 0.3);
+  transform: rotate(-4deg);
+}
+
+.submission-guide-context {
+  display: grid;
+  gap: 6px;
+  padding: 2px 20px;
+  border-right: 1px solid rgba(255, 231, 184, 0.16);
+  border-left: 1px solid rgba(255, 231, 184, 0.16);
+  color: rgba(255, 239, 204, 0.78);
+  font-family: 'Songti SC', 'STSong', serif;
+  font-size: 13px;
+  text-align: center;
+}
+
+.submission-guide-context span:last-child {
+  color: rgba(255, 235, 192, 0.5);
+  font-family: Georgia, serif;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.submission-guide-requirements {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.submission-guide-requirement {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) 8px;
+  gap: 7px;
+  align-items: center;
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid rgba(47, 34, 20, 0.27);
+  border-radius: 3px 8px 3px 7px;
+  background: rgba(50, 35, 20, 0.15);
+  color: rgba(255, 238, 199, 0.68);
+  box-shadow: inset 0 1px rgba(255, 248, 222, 0.09);
+}
+
+.submission-guide-requirement > span {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.submission-guide-requirement strong,
+.submission-guide-requirement small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.submission-guide-requirement strong {
+  font-family: 'Songti SC', 'STSong', serif;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.submission-guide-requirement small {
+  color: rgba(255, 233, 188, 0.46);
+  font-size: 8px;
+}
+
+.submission-guide-requirement i {
+  width: 7px;
+  height: 7px;
+  border: 1px solid rgba(255, 229, 180, 0.44);
+  border-radius: 50%;
+}
+
+.submission-guide-requirement.fulfilled {
+  background: rgba(67, 91, 61, 0.48);
+  color: #fff0c8;
+}
+
+.submission-guide-requirement.fulfilled i {
+  border-color: #dce0af;
+  background: #dce0af;
+  box-shadow: 0 0 0 2px rgba(220, 224, 175, 0.14);
+}
+
+.submission-guide > p {
+  position: absolute;
+  right: 46px;
+  bottom: 5px;
+  margin: 0;
+  color: rgba(255, 234, 188, 0.38);
+  font-family: 'Songti SC', 'STSong', serif;
+  font-size: 8px;
+  letter-spacing: 0.04em;
+}
+
+.submission-cache-bubble {
+  position: absolute;
+  bottom: clamp(62px, 9vh, 112px);
+  left: 42%;
+  z-index: 18;
+  width: min(410px, calc(100vw - 42px));
+  padding: 16px 17px 15px;
+  border: 1px solid rgba(94, 79, 49, 0.34);
+  border-radius: 20px 17px 22px 16px / 18px 22px 17px 20px;
+  background:
+    linear-gradient(100deg, rgba(113, 91, 48, 0.04), transparent 25%, rgba(113, 91, 48, 0.04)),
+    rgba(246, 237, 205, 0.96);
+  box-shadow:
+    0 18px 42px rgba(39, 44, 33, 0.24),
+    inset 0 1px rgba(255, 255, 255, 0.66);
+  color: #5d4a2d;
+  transform: translateX(-50%) rotate(-0.5deg);
+}
+
+.submission-cache-tail {
+  position: absolute;
+  top: -24px;
+  right: 54px;
+  width: 52px;
+  height: 34px;
+  background: rgba(246, 237, 205, 0.96);
+  clip-path: polygon(8% 100%, 100% 100%, 0 0);
+  filter: drop-shadow(-1px -1px rgba(94, 79, 49, 0.22));
+}
+
+.submission-cache-bubble header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 3px 10px;
+  border-bottom: 1px solid rgba(102, 82, 47, 0.18);
+}
+
+.submission-cache-bubble header > span {
+  display: grid;
+  gap: 1px;
+}
+
+.submission-cache-bubble header small {
+  color: rgba(93, 74, 42, 0.46);
+  font-family: Georgia, serif;
+  font-size: 8px;
+  letter-spacing: 0.12em;
+}
+
+.submission-cache-bubble header strong {
+  color: #59411e;
+  font-family: 'Songti SC', 'STSong', serif;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+
+.submission-cache-bubble header em {
+  color: rgba(83, 102, 75, 0.75);
+  font-family: 'Songti SC', 'STSong', serif;
+  font-size: 10px;
+  font-style: normal;
+}
+
+.submission-cache-list {
+  display: grid;
+  gap: 6px;
+  max-height: 150px;
+  margin: 9px 0;
+  overflow: auto;
+  scrollbar-color: rgba(92, 110, 82, 0.4) transparent;
+  scrollbar-width: thin;
+}
+
+.submission-cache-item {
+  display: grid;
+  grid-template-columns: 27px minmax(0, 1fr) 25px;
+  gap: 8px;
+  align-items: center;
+  padding: 7px 8px;
+  border: 1px solid rgba(99, 79, 43, 0.15);
+  border-radius: 4px 11px 4px 9px;
+  background: rgba(255, 252, 232, 0.46);
+}
+
+.submission-cache-index {
+  color: rgba(91, 74, 43, 0.43);
+  font-family: Georgia, serif;
+  font-size: 10px;
+}
+
+.submission-cache-name {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.submission-cache-name strong,
+.submission-cache-name small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.submission-cache-name strong {
+  color: #5c4727;
+  font-family: 'Songti SC', 'STSong', serif;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.submission-cache-name small {
+  color: rgba(88, 71, 42, 0.47);
+  font-size: 8px;
+}
+
+.submission-cache-item > button {
+  width: 23px;
+  height: 23px;
+  padding: 0;
+  border: 1px solid rgba(134, 78, 57, 0.34);
+  border-radius: 50% 45% 48% 42%;
+  background: transparent;
+  color: #95624e;
+  font-family: Georgia, serif;
+  font-size: 18px;
+  line-height: 19px;
+  cursor: pointer;
+  transition: 180ms ease;
+}
+
+.submission-cache-item > button:hover:not(:disabled) {
+  background: #95624e;
+  color: #f8edcf;
+  transform: rotate(8deg) scale(1.05);
+}
+
+.submission-cache-empty {
+  margin: 14px 0 12px;
+  color: rgba(87, 70, 41, 0.62);
+  font-family: 'Songti SC', 'STSong', serif;
+  font-size: 13px;
+  line-height: 1.65;
+  text-align: center;
+}
+
+.submission-cache-empty small {
+  color: rgba(87, 70, 41, 0.4);
+  font-size: 9px;
+}
+
+.submission-cache-bubble footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 2px;
+}
+
+.submission-cache-bubble footer button {
+  border: 0;
+  font-family: 'Songti SC', 'STSong', serif;
+  cursor: pointer;
+}
+
+.submission-cache-add {
+  padding: 7px 4px;
+  background: transparent;
+  color: #62745a;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.submission-cache-add span {
+  display: inline-grid;
+  width: 20px;
+  height: 20px;
+  margin-right: 4px;
+  place-items: center;
+  border: 1px solid rgba(87, 107, 79, 0.45);
+  border-radius: 50%;
+}
+
+.submission-cache-submit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 12px 3px 4px;
+  border-radius: 22px 5px 5px 22px !important;
+  background: rgba(95, 114, 86, 0.12);
+  color: #52654c;
+  font-size: 11px;
+  letter-spacing: 0.07em;
+}
+
+.submission-cache-seal {
+  display: grid;
+  width: 31px;
+  height: 31px;
+  place-items: center;
+  border: 1px solid rgba(112, 64, 49, 0.52);
+  border-radius: 48% 43% 51% 45%;
+  background: #9c624e;
+  color: #f7e9c9;
+  font-family: Georgia, serif;
+  font-size: 13px;
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.16);
+  transition: transform 220ms ease;
+}
+
+.submission-cache-submit:hover:not(:disabled) .submission-cache-seal {
+  transform: rotate(-8deg) scale(1.06);
+}
+
+.submission-cache-bubble button:disabled {
+  cursor: default;
+  filter: grayscale(0.45);
+  opacity: 0.42;
+}
+
+.submission-guide-enter-active,
+.submission-guide-leave-active {
+  transition:
+    opacity 380ms ease,
+    transform 520ms cubic-bezier(0.22, 1, 0.36, 1),
+    filter 380ms ease;
+}
+
+.submission-guide-enter-from,
+.submission-guide-leave-to {
+  opacity: 0;
+  filter: blur(5px);
+  transform: translate(-50%, -18px) rotate(-1deg) scale(0.97);
+}
+
+.submission-cache-enter-active,
+.submission-cache-leave-active {
+  transition:
+    opacity 320ms ease,
+    transform 460ms cubic-bezier(0.22, 1, 0.36, 1),
+    filter 320ms ease;
+}
+
+.submission-cache-enter-from,
+.submission-cache-leave-to {
+  opacity: 0;
+  filter: blur(4px);
+  transform: translate(-50%, 20px) rotate(-2deg) scale(0.96);
+}
+
+@media (max-width: 720px) {
+  .submission-guide {
+    top: 16px;
+    grid-template-columns: 1fr 1fr;
+    gap: 9px;
+    width: calc(100vw - 28px);
+    min-height: 0;
+    padding: 13px 20px;
+  }
+
+  .submission-guide-context {
+    border-right: 0;
+  }
+
+  .submission-guide-requirements {
+    grid-column: 1 / -1;
+  }
+
+  .submission-guide > p {
+    display: none;
+  }
+
+  .submission-cache-bubble {
+    bottom: 24px;
+    left: 50%;
+    width: calc(100vw - 28px);
+  }
 }
 
 .loading-panel,
