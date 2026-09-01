@@ -135,9 +135,6 @@ let submissionSignTween: gsap.core.Tween | null = null
 let submissionSignTargetY = 0
 let resizeObserver: ResizeObserver | null = null
 let animationFrame = 0
-let lastRenderedAt = 0
-let lastVenuePositionUpdateAt = 0
-let lastCameraReadoutUpdateAt = 0
 let smsCountdownTimer: ReturnType<typeof setInterval> | null = null
 let topPage: THREE.Mesh | null = null
 let paperSurfaceMesh: THREE.Mesh | null = null
@@ -154,12 +151,6 @@ const pagePointer = new THREE.Vector2()
 const topPageInitialPosition = new THREE.Vector3()
 const topPageInitialRotation = new THREE.Euler()
 const topPageInitialScale = new THREE.Vector3(1, 1, 1)
-
-const IDLE_FRAME_INTERVAL = 1000 / 30
-const CINEMATIC_FRAME_INTERVAL = 1000 / 45
-const VENUE_POSITION_INTERVAL = 1000 / 20
-const CAMERA_READOUT_INTERVAL = 1000 / 10
-const MAX_PIXEL_RATIO = 1.5
 
 interface CameraFlight {
   startTarget: THREE.Vector3
@@ -291,15 +282,6 @@ interface SubmissionEnvelopeVisual {
   homeScale: THREE.Vector3
 }
 
-type SubmissionEnvelopeFlapState = 'closed' | 'opening' | 'open' | 'closing'
-
-interface SubmissionEnvelopeFlapVisual {
-  pivot: THREE.Group
-  flap: THREE.Mesh
-  underside: THREE.Mesh
-  interior: THREE.Mesh
-}
-
 interface PushedTreeAnimation {
   pivot: THREE.Group
   baseQuaternion: THREE.Quaternion
@@ -321,9 +303,6 @@ let selectedApplicationTarget: ApplicationNavigationTarget | null = null
 let submissionEnvelope: SubmissionEnvelopeVisual | null = null
 let submissionEnvelopeState: SubmissionEnvelopeState = 'hidden'
 let submissionEnvelopeTween: gsap.core.Timeline | null = null
-let submissionEnvelopeFlap: SubmissionEnvelopeFlapVisual | null = null
-let submissionEnvelopeFlapState: SubmissionEnvelopeFlapState = 'closed'
-let submissionEnvelopeFlapTween: gsap.core.Timeline | null = null
 let submissionEnvelopeReturnTimer: ReturnType<typeof setTimeout> | null = null
 let submissionNoticeTimer: ReturnType<typeof setTimeout> | null = null
 let submissionEnvelopeFileName = ''
@@ -462,9 +441,6 @@ const submissionEnvelopeDebug = {
   returnDuration: 0.9,
   successHold: 1.05,
   startAdvance: 0.6,
-  flapAngle: -146,
-  flapDuration: 0.72,
-  flapOpenDelay: 0.16,
 }
 
 const submissionEnvelopeActions = {
@@ -473,8 +449,6 @@ const submissionEnvelopeActions = {
     showSubmissionEnvelope()
   },
   previewReturn: () => hideSubmissionEnvelope(),
-  previewOpen: () => openSubmissionEnvelopeFlap(),
-  previewClose: () => closeSubmissionEnvelopeFlap(),
   printCurrent: () => printSubmissionEnvelopeParameters(),
 }
 
@@ -659,237 +633,6 @@ function showSubmissionNotice(
   }, duration)
 }
 
-function createSubmissionEnvelopeFlap(object: THREE.Object3D) {
-  if (!(object instanceof THREE.Mesh)) return null
-  const geometry = object.geometry
-  const position = geometry.getAttribute('position')
-  const normal = geometry.getAttribute('normal')
-  const uv = geometry.getAttribute('uv')
-  const index = geometry.getIndex()
-  if (!position || !normal || !uv || !index) return null
-
-  // The downloadable mailbox keeps the submission envelope as a single thin
-  // mesh. Its visible envelope face is the only UV island in the far-left part
-  // of the atlas. Recover its four corners so the painted triangular flap can
-  // become an independently hinged 3D piece without modifying the source GLB.
-  const faceVertexIndices = new Set<number>()
-  for (let offset = 0; offset < index.count; offset += 3) {
-    const triangle = [index.getX(offset), index.getX(offset + 1), index.getX(offset + 2)]
-    const averageU = triangle.reduce((sum, vertexIndex) => sum + uv.getX(vertexIndex), 0) / 3
-    if (averageU < 0.24) triangle.forEach((vertexIndex) => faceVertexIndices.add(vertexIndex))
-  }
-  if (faceVertexIndices.size !== 4) {
-    console.warn('[3D 信封开合] 未能识别信封正面 UV 区域')
-    return null
-  }
-
-  const corners = [...faceVertexIndices].map((vertexIndex) => ({
-    position: new THREE.Vector3().fromBufferAttribute(position, vertexIndex),
-    normal: new THREE.Vector3().fromBufferAttribute(normal, vertexIndex),
-    uv: new THREE.Vector2().fromBufferAttribute(uv, vertexIndex),
-  }))
-  const sortedByHeight = [...corners].sort((a, b) => b.position.y - a.position.y)
-  const topCorners = sortedByHeight.slice(0, 2).sort((a, b) => a.position.x - b.position.x)
-  const bottomCorners = sortedByHeight.slice(2).sort((a, b) => a.position.x - b.position.x)
-  const [topLeft, topRight] = topCorners
-  const [bottomLeft, bottomRight] = bottomCorners
-  if (!topLeft || !topRight || !bottomLeft || !bottomRight) return null
-
-  const topCenter = topLeft.position.clone().lerp(topRight.position, 0.5)
-  const bottomCenter = bottomLeft.position.clone().lerp(bottomRight.position, 0.5)
-  const topCenterUv = topLeft.uv.clone().lerp(topRight.uv, 0.5)
-  const bottomCenterUv = bottomLeft.uv.clone().lerp(bottomRight.uv, 0.5)
-  const flapTip = topCenter.clone().lerp(bottomCenter, 0.57)
-  const flapTipUv = topCenterUv.clone().lerp(bottomCenterUv, 0.57)
-  const interiorTip = topCenter.clone().lerp(bottomCenter, 0.84)
-  const faceNormal = corners
-    .reduce((sum, corner) => sum.add(corner.normal), new THREE.Vector3())
-    .normalize()
-
-  const flapGeometry = new THREE.BufferGeometry()
-  const flapPositions = [topLeft.position, topRight.position, flapTip]
-    .flatMap((point) => point.clone().sub(topCenter).toArray())
-  flapGeometry.setAttribute('position', new THREE.Float32BufferAttribute(flapPositions, 3))
-  flapGeometry.setAttribute(
-    'normal',
-    new THREE.Float32BufferAttribute([...faceNormal.toArray(), ...faceNormal.toArray(), ...faceNormal.toArray()], 3),
-  )
-  flapGeometry.setAttribute(
-    'uv',
-    new THREE.Float32BufferAttribute([
-      ...topLeft.uv.toArray(),
-      ...topRight.uv.toArray(),
-      ...flapTipUv.toArray(),
-    ], 2),
-  )
-  flapGeometry.setIndex([0, 2, 1])
-
-  const interiorGeometry = new THREE.BufferGeometry()
-  interiorGeometry.setAttribute(
-    'position',
-    new THREE.Float32BufferAttribute(
-      [topLeft.position, topRight.position, interiorTip].flatMap((point) => point.toArray()),
-      3,
-    ),
-  )
-  interiorGeometry.setAttribute(
-    'normal',
-    new THREE.Float32BufferAttribute([...faceNormal.toArray(), ...faceNormal.toArray(), ...faceNormal.toArray()], 3),
-  )
-  interiorGeometry.setIndex([0, 2, 1])
-
-  const sourceMaterial = Array.isArray(object.material) ? object.material[0] : object.material
-  const flapMaterial = sourceMaterial.clone()
-  flapMaterial.name = 'Submission_Envelope_Flap_Material'
-  flapMaterial.transparent = false
-  flapMaterial.opacity = 1
-  flapMaterial.depthTest = true
-  flapMaterial.depthWrite = true
-  flapMaterial.side = THREE.FrontSide
-  if (flapMaterial instanceof THREE.MeshStandardMaterial) {
-    flapMaterial.roughness = 0.92
-    flapMaterial.metalness = 0
-    flapMaterial.polygonOffset = true
-    flapMaterial.polygonOffsetFactor = -2
-    flapMaterial.polygonOffsetUnits = -2
-  }
-
-  const interiorMaterial = new THREE.MeshStandardMaterial({
-    name: 'Submission_Envelope_Interior_Material',
-    color: '#ead9b6',
-    roughness: 1,
-    metalness: 0,
-    side: THREE.DoubleSide,
-    polygonOffset: true,
-    polygonOffsetFactor: -1,
-    polygonOffsetUnits: -1,
-  })
-  const undersideMaterial = new THREE.MeshStandardMaterial({
-    name: 'Submission_Envelope_Flap_Underside_Material',
-    color: '#efe1bf',
-    roughness: 1,
-    metalness: 0,
-    side: THREE.BackSide,
-  })
-
-  const interior = new THREE.Mesh(interiorGeometry, interiorMaterial)
-  interior.name = 'Submission_Envelope_Interior'
-  interior.position.copy(faceNormal).multiplyScalar(0.0014)
-  interior.renderOrder = object.renderOrder + 1
-  interior.castShadow = false
-  interior.receiveShadow = false
-  interior.visible = false
-  object.add(interior)
-
-  const pivot = new THREE.Group()
-  pivot.name = 'Submission_Envelope_Flap_Pivot'
-  pivot.position.copy(topCenter).addScaledVector(faceNormal, 0.0024)
-  object.add(pivot)
-
-  const flap = new THREE.Mesh(flapGeometry, flapMaterial)
-  flap.name = 'Submission_Envelope_Flap'
-  flap.renderOrder = object.renderOrder + 2
-  flap.castShadow = true
-  flap.receiveShadow = true
-  pivot.add(flap)
-
-  const underside = new THREE.Mesh(flapGeometry.clone(), undersideMaterial)
-  underside.name = 'Submission_Envelope_Flap_Underside'
-  underside.renderOrder = object.renderOrder + 2
-  underside.castShadow = true
-  underside.receiveShadow = true
-  pivot.add(underside)
-
-  return { pivot, flap, underside, interior } satisfies SubmissionEnvelopeFlapVisual
-}
-
-function resetSubmissionEnvelopeFlap() {
-  submissionEnvelopeFlapTween?.kill()
-  submissionEnvelopeFlapTween = null
-  submissionEnvelopeFlapState = 'closed'
-  if (!submissionEnvelopeFlap) return
-  submissionEnvelopeFlap.pivot.rotation.set(0, 0, 0)
-  submissionEnvelopeFlap.interior.visible = false
-}
-
-function openSubmissionEnvelopeFlap() {
-  if (!submissionEnvelopeFlap || submissionEnvelopeFlapState === 'open') return
-  submissionEnvelopeFlapTween?.kill()
-  submissionEnvelopeFlapState = 'opening'
-  submissionEnvelopeFlap.interior.visible = true
-  const targetAngle = THREE.MathUtils.degToRad(submissionEnvelopeDebug.flapAngle)
-  const duration = THREE.MathUtils.clamp(submissionEnvelopeDebug.flapDuration, 0.2, 2)
-  const { pivot } = submissionEnvelopeFlap
-
-  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-    pivot.rotation.set(targetAngle, 0, 0)
-    submissionEnvelopeFlapState = 'open'
-    return
-  }
-
-  submissionEnvelopeFlapTween = gsap
-    .timeline({
-      onComplete: () => {
-        submissionEnvelopeFlapState = 'open'
-        submissionEnvelopeFlapTween = null
-      },
-    })
-    .to(pivot.rotation, {
-      x: targetAngle * 0.92,
-      y: -0.025,
-      z: 0.014,
-      duration: duration * 0.78,
-      ease: 'power2.inOut',
-    })
-    .to(pivot.rotation, {
-      x: targetAngle,
-      y: 0,
-      z: 0,
-      duration: duration * 0.22,
-      ease: 'back.out(1.6)',
-    })
-}
-
-function closeSubmissionEnvelopeFlap(immediate = false) {
-  if (!submissionEnvelopeFlap) return
-  submissionEnvelopeFlapTween?.kill()
-  submissionEnvelopeFlapTween = null
-  const { pivot } = submissionEnvelopeFlap
-
-  if (immediate || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-    pivot.rotation.set(0, 0, 0)
-    submissionEnvelopeFlap.interior.visible = false
-    submissionEnvelopeFlapState = 'closed'
-    return
-  }
-
-  submissionEnvelopeFlapState = 'closing'
-  const duration = THREE.MathUtils.clamp(submissionEnvelopeDebug.flapDuration, 0.2, 2)
-  submissionEnvelopeFlapTween = gsap
-    .timeline({
-      onComplete: () => {
-        pivot.rotation.set(0, 0, 0)
-        if (submissionEnvelopeFlap) submissionEnvelopeFlap.interior.visible = false
-        submissionEnvelopeFlapState = 'closed'
-        submissionEnvelopeFlapTween = null
-      },
-    })
-    .to(pivot.rotation, {
-      x: THREE.MathUtils.degToRad(-8),
-      y: 0.018,
-      z: -0.01,
-      duration: duration * 0.78,
-      ease: 'power2.inOut',
-    })
-    .to(pivot.rotation, {
-      x: 0,
-      y: 0,
-      z: 0,
-      duration: duration * 0.22,
-      ease: 'back.out(2.2)',
-    })
-}
-
 function registerSubmissionEnvelope(root: THREE.Object3D) {
   const object = root.getObjectByName('Submission_Envelope')
   if (!object?.parent) {
@@ -901,8 +644,6 @@ function registerSubmissionEnvelope(root: THREE.Object3D) {
     child.castShadow = true
     child.receiveShadow = true
   })
-  submissionEnvelopeFlap = createSubmissionEnvelopeFlap(object)
-  resetSubmissionEnvelopeFlap()
   submissionEnvelope = {
     object,
     homeParent: object.parent,
@@ -945,7 +686,6 @@ function printSubmissionEnvelopeParameters() {
 function resetSubmissionEnvelope() {
   submissionEnvelopeTween?.kill()
   submissionEnvelopeTween = null
-  resetSubmissionEnvelopeFlap()
   if (submissionEnvelopeReturnTimer) {
     clearTimeout(submissionEnvelopeReturnTimer)
     submissionEnvelopeReturnTimer = null
@@ -999,17 +739,11 @@ function showSubmissionEnvelope() {
       duration: flyDuration,
       ease: 'power3.out',
     }, 0)
-    .call(
-      () => openSubmissionEnvelopeFlap(),
-      [],
-      flyDuration + THREE.MathUtils.clamp(submissionEnvelopeDebug.flapOpenDelay, 0, 1.5),
-    )
 }
 
 function hideSubmissionEnvelope(onReturned?: () => void) {
   if (!submissionEnvelope || !camera || submissionEnvelopeState === 'hidden') return
   submissionEnvelopeTween?.kill()
-  closeSubmissionEnvelopeFlap()
   const { object, homeParent, homePosition, homeQuaternion, homeScale } = submissionEnvelope
   camera.updateMatrixWorld(true)
   homeParent.updateMatrixWorld(true)
@@ -1084,7 +818,6 @@ function openSubmissionFilePicker() {
     submissionFilesUploading.value
     || !['ready', 'drag', 'error'].includes(submissionEnvelopeState)
   ) return
-  openSubmissionEnvelopeFlap()
   applicationFileInput.value?.click()
 }
 
@@ -1132,7 +865,6 @@ function stageSubmissionFiles(files: File[]) {
 
   if (!accepted.length) return
   pendingSubmissionFiles.value = [...pendingSubmissionFiles.value, ...accepted]
-  closeSubmissionEnvelopeFlap()
   setSubmissionEnvelopeState(
     'ready',
     `已暂存 ${pendingSubmissionFiles.value.length} 个文件，等待确认`,
@@ -1148,7 +880,6 @@ function removeStagedSubmissionFile(id: string) {
       ? `已暂存 ${pendingSubmissionFiles.value.length} 个文件，等待确认`
       : '点击信封或拖入文件，先暂存后提交',
   )
-  if (pendingSubmissionFiles.value.length === 0) openSubmissionEnvelopeFlap()
 }
 
 function getSubmissionErrorMessage(error: unknown) {
@@ -1192,7 +923,6 @@ async function submitStagedApplicationFiles() {
   }
 
   submissionFilesUploading.value = true
-  closeSubmissionEnvelopeFlap()
   const fileCount = pendingSubmissionFiles.value.length
   setSubmissionEnvelopeState('uploading', `正在送出 ${fileCount} 个文件，请稍候`)
   showSubmissionNotice(
@@ -1273,7 +1003,6 @@ function handleSubmissionDragOver(event: DragEvent) {
     return
   }
   event.preventDefault()
-  openSubmissionEnvelopeFlap()
   if (submissionEnvelopeState === 'ready' || submissionEnvelopeState === 'error') {
     setSubmissionEnvelopeState('drag', '松开即可将文件暂存在信封中')
   }
@@ -1978,19 +1707,8 @@ function createCameraDebugGui(distance: number, target: THREE.Vector3) {
   submissionEnvelopeFolder
     .add(submissionEnvelopeDebug, 'successHold', 0, 5, 0.05)
     .name('成功停留 秒')
-  submissionEnvelopeFolder
-    .add(submissionEnvelopeDebug, 'flapAngle', -175, 175, 1)
-    .name('封口打开角度 °')
-  submissionEnvelopeFolder
-    .add(submissionEnvelopeDebug, 'flapDuration', 0.2, 2, 0.05)
-    .name('封口开合时长 秒')
-  submissionEnvelopeFolder
-    .add(submissionEnvelopeDebug, 'flapOpenDelay', 0, 1.5, 0.05)
-    .name('飞出后开启延迟 秒')
   submissionEnvelopeFolder.add(submissionEnvelopeActions, 'previewOut').name('预览信封飞出')
   submissionEnvelopeFolder.add(submissionEnvelopeActions, 'previewReturn').name('预览信封收回')
-  submissionEnvelopeFolder.add(submissionEnvelopeActions, 'previewOpen').name('预览信封打开')
-  submissionEnvelopeFolder.add(submissionEnvelopeActions, 'previewClose').name('预览信封关闭')
   submissionEnvelopeFolder.add(submissionEnvelopeActions, 'printCurrent').name('输出信封参数')
 
   const pushedTreeFolder = debugGui.addFolder('浣熊推树动画')
@@ -2516,23 +2234,10 @@ function resizeRenderer() {
   const { clientWidth, clientHeight } = viewport.value
   if (!clientWidth || !clientHeight) return
 
-  // A DPR of 2 quadruples the fragment workload on Retina displays. The
-  // stylized scene remains crisp at 1.25–1.5 while using substantially less
-  // render-target memory and GPU bandwidth.
-  const largeViewport = clientWidth * clientHeight > 1_500_000
-  const pixelRatioLimit = largeViewport ? 1.25 : MAX_PIXEL_RATIO
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, pixelRatioLimit))
   renderer.setSize(clientWidth, clientHeight, false)
   camera.aspect = clientWidth / clientHeight
   camera.updateProjectionMatrix()
   updateSubmissionSignLayout()
-}
-
-function handleSceneVisibilityChange() {
-  // Reset the frame clock after returning to the tab so the next animation
-  // does not receive a large elapsed interval. Rendering itself is skipped by
-  // animate() while the document is hidden.
-  if (!document.hidden) lastRenderedAt = performance.now()
 }
 
 function isVisibleInScene(object: THREE.Object3D) {
@@ -2739,16 +2444,8 @@ function cachePaperFacePoints(paper: THREE.Mesh) {
     if (surfaceArea <= largestSurfaceArea) continue
 
     largestSurfaceArea = surfaceArea
+    paperVisibleFacePoints = cluster
     paperVisibleFaceZ = cluster.reduce((sum, facePoint) => sum + facePoint.z, 0) / cluster.length
-    // The projected extrema of this flat sheet are fully described by four
-    // corners. Keeping every source vertex made the DOM bookmark positioning
-    // loop transform hundreds of redundant points on every frame.
-    paperVisibleFacePoints = [
-      new THREE.Vector3(surfaceBounds.min.x, surfaceBounds.min.y, paperVisibleFaceZ),
-      new THREE.Vector3(surfaceBounds.min.x, surfaceBounds.max.y, paperVisibleFaceZ),
-      new THREE.Vector3(surfaceBounds.max.x, surfaceBounds.min.y, paperVisibleFaceZ),
-      new THREE.Vector3(surfaceBounds.max.x, surfaceBounds.max.y, paperVisibleFaceZ),
-    ]
   }
 }
 
@@ -2854,51 +2551,22 @@ function updateVenueSelectorPosition() {
   }
 }
 
-function animate(now = performance.now()) {
+function animate() {
   if (!renderer || !scene || !camera) return
   animationFrame = requestAnimationFrame(animate)
 
-  if (document.hidden) {
-    lastRenderedAt = now
-    return
-  }
-
-  const cinematicFrame = Boolean(
-    cameraFlight
-    || postLoginFlight
-    || applicationFlight
-    || submissionEnvelopeTween?.isActive()
-    || submissionEnvelopeFlapTween?.isActive()
-    || submissionSignTween?.isActive(),
-  )
-  const frameInterval = cinematicFrame ? CINEMATIC_FRAME_INTERVAL : IDLE_FRAME_INTERVAL
-  const sinceLastFrame = now - lastRenderedAt
-  if (sinceLastFrame < frameInterval) return
-  lastRenderedAt = now - (sinceLastFrame % frameInterval)
-
-  const elapsed = now * 0.001
+  const elapsed = performance.now() * 0.001
   for (const shader of windShaders) shader.time.value = elapsed
   updateRaccoonPushedTree(elapsed)
   if (pageTurnShader) pageTurnShader.time.value = elapsed
   pageContentCanvas?.tick()
 
-  const movingSceneObject = Boolean(postLoginFlight || applicationFlight)
+  const now = performance.now()
   const cameraIsMoving =
     updateCameraEntrance(now) || updatePostLoginCamera(now) || updateApplicationCamera(now)
-  if (!cameraIsMoving && controls?.enabled) controls.update()
-
-  // Static scene shadows are cached. Refresh them only while the clipboard is
-  // moving, then leave the completed map in place for subsequent frames.
-  if (movingSceneObject) renderer.shadowMap.needsUpdate = true
-
-  if (now - lastVenuePositionUpdateAt >= VENUE_POSITION_INTERVAL) {
-    updateVenueSelectorPosition()
-    lastVenuePositionUpdateAt = now
-  }
-  if (now - lastCameraReadoutUpdateAt >= CAMERA_READOUT_INTERVAL) {
-    updateCameraReadout()
-    lastCameraReadoutUpdateAt = now
-  }
+  if (!cameraIsMoving) controls?.update()
+  updateVenueSelectorPosition()
+  updateCameraReadout()
   renderer.render(scene, camera)
 }
 
@@ -3277,14 +2945,13 @@ onMounted(() => {
   camera = new THREE.PerspectiveCamera(42, 1, 0.1, 1000)
   camera.position.set(4, 3, 6)
 
-  renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'default' })
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_PIXEL_RATIO))
+  renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' })
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
   renderer.outputColorSpace = THREE.SRGBColorSpace
   renderer.toneMapping = THREE.ACESFilmicToneMapping
   renderer.toneMappingExposure = 1.15
   renderer.shadowMap.enabled = true
   renderer.shadowMap.type = THREE.PCFShadowMap
-  renderer.shadowMap.autoUpdate = false
   viewport.value.appendChild(renderer.domElement)
   scene.add(camera)
 
@@ -3312,7 +2979,7 @@ onMounted(() => {
   const keyLight = new THREE.DirectionalLight('#fff3d2', 3.4)
   keyLight.position.set(6, 10, 8)
   keyLight.castShadow = true
-  keyLight.shadow.mapSize.set(1024, 1024)
+  keyLight.shadow.mapSize.set(2048, 2048)
   // The imported clipboard contains broad, nearly coplanar paper surfaces.
   // A small normal offset prevents directional-shadow self-intersection from
   // appearing as diagonal bands across the otherwise flat sheet.
@@ -3433,7 +3100,6 @@ onMounted(() => {
       }
 
       scene.add(model)
-      if (renderer) renderer.shadowMap.needsUpdate = true
       startCameraEntrance(model, houseModel)
       // Match live GUI editing: establish the house-based camera composition at
       // its authored size first, then apply the saved visual scale.
@@ -3448,7 +3114,6 @@ onMounted(() => {
 
   resizeObserver = new ResizeObserver(resizeRenderer)
   resizeObserver.observe(viewport.value)
-  document.addEventListener('visibilitychange', handleSceneVisibilityChange)
   resizeRenderer()
   animate()
 })
@@ -3458,13 +3123,11 @@ onBeforeUnmount(() => {
   stopSmsCountdown()
   revokeRegistrationCaptcha()
   submissionEnvelopeTween?.kill()
-  submissionEnvelopeFlapTween?.kill()
   submissionSignTween?.kill()
   if (submissionEnvelopeReturnTimer) clearTimeout(submissionEnvelopeReturnTimer)
   if (submissionNoticeTimer) clearTimeout(submissionNoticeTimer)
   pageTurnTimeline?.kill()
   resizeObserver?.disconnect()
-  document.removeEventListener('visibilitychange', handleSceneVisibilityChange)
   controls?.dispose()
   debugGui?.destroy()
   renderer?.domElement.removeEventListener('wheel', handlePaperWheel, true)
@@ -3524,9 +3187,6 @@ onBeforeUnmount(() => {
   selectedApplicationTarget = null
   submissionEnvelope = null
   submissionEnvelopeTween = null
-  submissionEnvelopeFlap = null
-  submissionEnvelopeFlapTween = null
-  submissionEnvelopeFlapState = 'closed'
   submissionEnvelopeReturnTimer = null
   pushedTreeAnimation = null
   startCameraTarget = null
