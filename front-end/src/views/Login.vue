@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import axios from 'axios'
 import * as THREE from 'three'
 import { gsap } from 'gsap'
@@ -135,6 +135,7 @@ let submissionSignTween: gsap.core.Tween | null = null
 let submissionSignTargetY = 0
 let resizeObserver: ResizeObserver | null = null
 let animationFrame = 0
+let selectorPositionTimers: Array<ReturnType<typeof setTimeout>> = []
 let lastRenderedAt = 0
 let lastVenuePositionUpdateAt = 0
 let lastCameraReadoutUpdateAt = 0
@@ -156,7 +157,6 @@ const topPageInitialRotation = new THREE.Euler()
 const topPageInitialScale = new THREE.Vector3(1, 1, 1)
 
 const IDLE_FRAME_INTERVAL = 1000 / 30
-const CINEMATIC_FRAME_INTERVAL = 1000 / 45
 const VENUE_POSITION_INTERVAL = 1000 / 20
 const CAMERA_READOUT_INTERVAL = 1000 / 10
 const MAX_PIXEL_RATIO = 1.5
@@ -462,9 +462,6 @@ const submissionEnvelopeDebug = {
   returnDuration: 0.9,
   successHold: 1.05,
   startAdvance: 0.6,
-  flapAngle: -146,
-  flapDuration: 0.72,
-  flapOpenDelay: 0.16,
 }
 
 const submissionEnvelopeActions = {
@@ -473,8 +470,6 @@ const submissionEnvelopeActions = {
     showSubmissionEnvelope()
   },
   previewReturn: () => hideSubmissionEnvelope(),
-  previewOpen: () => openSubmissionEnvelopeFlap(),
-  previewClose: () => closeSubmissionEnvelopeFlap(),
   printCurrent: () => printSubmissionEnvelopeParameters(),
 }
 
@@ -659,148 +654,11 @@ function showSubmissionNotice(
   }, duration)
 }
 
-function createSubmissionEnvelopeFlap(object: THREE.Object3D) {
-  if (!(object instanceof THREE.Mesh)) return null
-  const geometry = object.geometry
-  const position = geometry.getAttribute('position')
-  const normal = geometry.getAttribute('normal')
-  const uv = geometry.getAttribute('uv')
-  const index = geometry.getIndex()
-  if (!position || !normal || !uv || !index) return null
-
-  // The downloadable mailbox keeps the submission envelope as a single thin
-  // mesh. Its visible envelope face is the only UV island in the far-left part
-  // of the atlas. Recover its four corners so the painted triangular flap can
-  // become an independently hinged 3D piece without modifying the source GLB.
-  const faceVertexIndices = new Set<number>()
-  for (let offset = 0; offset < index.count; offset += 3) {
-    const triangle = [index.getX(offset), index.getX(offset + 1), index.getX(offset + 2)]
-    const averageU = triangle.reduce((sum, vertexIndex) => sum + uv.getX(vertexIndex), 0) / 3
-    if (averageU < 0.24) triangle.forEach((vertexIndex) => faceVertexIndices.add(vertexIndex))
-  }
-  if (faceVertexIndices.size !== 4) {
-    console.warn('[3D 信封开合] 未能识别信封正面 UV 区域')
-    return null
-  }
-
-  const corners = [...faceVertexIndices].map((vertexIndex) => ({
-    position: new THREE.Vector3().fromBufferAttribute(position, vertexIndex),
-    normal: new THREE.Vector3().fromBufferAttribute(normal, vertexIndex),
-    uv: new THREE.Vector2().fromBufferAttribute(uv, vertexIndex),
-  }))
-  const sortedByHeight = [...corners].sort((a, b) => b.position.y - a.position.y)
-  const topCorners = sortedByHeight.slice(0, 2).sort((a, b) => a.position.x - b.position.x)
-  const bottomCorners = sortedByHeight.slice(2).sort((a, b) => a.position.x - b.position.x)
-  const [topLeft, topRight] = topCorners
-  const [bottomLeft, bottomRight] = bottomCorners
-  if (!topLeft || !topRight || !bottomLeft || !bottomRight) return null
-
-  const topCenter = topLeft.position.clone().lerp(topRight.position, 0.5)
-  const bottomCenter = bottomLeft.position.clone().lerp(bottomRight.position, 0.5)
-  const topCenterUv = topLeft.uv.clone().lerp(topRight.uv, 0.5)
-  const bottomCenterUv = bottomLeft.uv.clone().lerp(bottomRight.uv, 0.5)
-  const flapTip = topCenter.clone().lerp(bottomCenter, 0.57)
-  const flapTipUv = topCenterUv.clone().lerp(bottomCenterUv, 0.57)
-  const interiorTip = topCenter.clone().lerp(bottomCenter, 0.84)
-  const faceNormal = corners
-    .reduce((sum, corner) => sum.add(corner.normal), new THREE.Vector3())
-    .normalize()
-
-  const flapGeometry = new THREE.BufferGeometry()
-  const flapPositions = [topLeft.position, topRight.position, flapTip]
-    .flatMap((point) => point.clone().sub(topCenter).toArray())
-  flapGeometry.setAttribute('position', new THREE.Float32BufferAttribute(flapPositions, 3))
-  flapGeometry.setAttribute(
-    'normal',
-    new THREE.Float32BufferAttribute([...faceNormal.toArray(), ...faceNormal.toArray(), ...faceNormal.toArray()], 3),
-  )
-  flapGeometry.setAttribute(
-    'uv',
-    new THREE.Float32BufferAttribute([
-      ...topLeft.uv.toArray(),
-      ...topRight.uv.toArray(),
-      ...flapTipUv.toArray(),
-    ], 2),
-  )
-  flapGeometry.setIndex([0, 2, 1])
-
-  const interiorGeometry = new THREE.BufferGeometry()
-  interiorGeometry.setAttribute(
-    'position',
-    new THREE.Float32BufferAttribute(
-      [topLeft.position, topRight.position, interiorTip].flatMap((point) => point.toArray()),
-      3,
-    ),
-  )
-  interiorGeometry.setAttribute(
-    'normal',
-    new THREE.Float32BufferAttribute([...faceNormal.toArray(), ...faceNormal.toArray(), ...faceNormal.toArray()], 3),
-  )
-  interiorGeometry.setIndex([0, 2, 1])
-
-  const sourceMaterial = Array.isArray(object.material) ? object.material[0] : object.material
-  const flapMaterial = sourceMaterial.clone()
-  flapMaterial.name = 'Submission_Envelope_Flap_Material'
-  flapMaterial.transparent = false
-  flapMaterial.opacity = 1
-  flapMaterial.depthTest = true
-  flapMaterial.depthWrite = true
-  flapMaterial.side = THREE.FrontSide
-  if (flapMaterial instanceof THREE.MeshStandardMaterial) {
-    flapMaterial.roughness = 0.92
-    flapMaterial.metalness = 0
-    flapMaterial.polygonOffset = true
-    flapMaterial.polygonOffsetFactor = -2
-    flapMaterial.polygonOffsetUnits = -2
-  }
-
-  const interiorMaterial = new THREE.MeshStandardMaterial({
-    name: 'Submission_Envelope_Interior_Material',
-    color: '#ead9b6',
-    roughness: 1,
-    metalness: 0,
-    side: THREE.DoubleSide,
-    polygonOffset: true,
-    polygonOffsetFactor: -1,
-    polygonOffsetUnits: -1,
-  })
-  const undersideMaterial = new THREE.MeshStandardMaterial({
-    name: 'Submission_Envelope_Flap_Underside_Material',
-    color: '#efe1bf',
-    roughness: 1,
-    metalness: 0,
-    side: THREE.BackSide,
-  })
-
-  const interior = new THREE.Mesh(interiorGeometry, interiorMaterial)
-  interior.name = 'Submission_Envelope_Interior'
-  interior.position.copy(faceNormal).multiplyScalar(0.0014)
-  interior.renderOrder = object.renderOrder + 1
-  interior.castShadow = false
-  interior.receiveShadow = false
-  interior.visible = false
-  object.add(interior)
-
-  const pivot = new THREE.Group()
-  pivot.name = 'Submission_Envelope_Flap_Pivot'
-  pivot.position.copy(topCenter).addScaledVector(faceNormal, 0.0024)
-  object.add(pivot)
-
-  const flap = new THREE.Mesh(flapGeometry, flapMaterial)
-  flap.name = 'Submission_Envelope_Flap'
-  flap.renderOrder = object.renderOrder + 2
-  flap.castShadow = true
-  flap.receiveShadow = true
-  pivot.add(flap)
-
-  const underside = new THREE.Mesh(flapGeometry.clone(), undersideMaterial)
-  underside.name = 'Submission_Envelope_Flap_Underside'
-  underside.renderOrder = object.renderOrder + 2
-  underside.castShadow = true
-  underside.receiveShadow = true
-  pivot.add(underside)
-
-  return { pivot, flap, underside, interior } satisfies SubmissionEnvelopeFlapVisual
+function createSubmissionEnvelopeFlap(_object: THREE.Object3D) {
+  // Keep the downloaded envelope mesh and atlas exactly as authored. The
+  // previous runtime reconstruction added a duplicate flap over the baked
+  // artwork, which changed the original appearance even while it was closed.
+  return null
 }
 
 function resetSubmissionEnvelopeFlap() {
@@ -813,81 +671,14 @@ function resetSubmissionEnvelopeFlap() {
 }
 
 function openSubmissionEnvelopeFlap() {
-  if (!submissionEnvelopeFlap || submissionEnvelopeFlapState === 'open') return
-  submissionEnvelopeFlapTween?.kill()
-  submissionEnvelopeFlapState = 'opening'
-  submissionEnvelopeFlap.interior.visible = true
-  const targetAngle = THREE.MathUtils.degToRad(submissionEnvelopeDebug.flapAngle)
-  const duration = THREE.MathUtils.clamp(submissionEnvelopeDebug.flapDuration, 0.2, 2)
-  const { pivot } = submissionEnvelopeFlap
-
-  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-    pivot.rotation.set(targetAngle, 0, 0)
-    submissionEnvelopeFlapState = 'open'
-    return
-  }
-
-  submissionEnvelopeFlapTween = gsap
-    .timeline({
-      onComplete: () => {
-        submissionEnvelopeFlapState = 'open'
-        submissionEnvelopeFlapTween = null
-      },
-    })
-    .to(pivot.rotation, {
-      x: targetAngle * 0.92,
-      y: -0.025,
-      z: 0.014,
-      duration: duration * 0.78,
-      ease: 'power2.inOut',
-    })
-    .to(pivot.rotation, {
-      x: targetAngle,
-      y: 0,
-      z: 0,
-      duration: duration * 0.22,
-      ease: 'back.out(1.6)',
-    })
+  // The source envelope has its folds and seal baked into one texture. Keep
+  // the reconstructed flap closed so the flying submission envelope remains
+  // visually consistent instead of exposing the duplicated baked artwork.
+  resetSubmissionEnvelopeFlap()
 }
 
-function closeSubmissionEnvelopeFlap(immediate = false) {
-  if (!submissionEnvelopeFlap) return
-  submissionEnvelopeFlapTween?.kill()
-  submissionEnvelopeFlapTween = null
-  const { pivot } = submissionEnvelopeFlap
-
-  if (immediate || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-    pivot.rotation.set(0, 0, 0)
-    submissionEnvelopeFlap.interior.visible = false
-    submissionEnvelopeFlapState = 'closed'
-    return
-  }
-
-  submissionEnvelopeFlapState = 'closing'
-  const duration = THREE.MathUtils.clamp(submissionEnvelopeDebug.flapDuration, 0.2, 2)
-  submissionEnvelopeFlapTween = gsap
-    .timeline({
-      onComplete: () => {
-        pivot.rotation.set(0, 0, 0)
-        if (submissionEnvelopeFlap) submissionEnvelopeFlap.interior.visible = false
-        submissionEnvelopeFlapState = 'closed'
-        submissionEnvelopeFlapTween = null
-      },
-    })
-    .to(pivot.rotation, {
-      x: THREE.MathUtils.degToRad(-8),
-      y: 0.018,
-      z: -0.01,
-      duration: duration * 0.78,
-      ease: 'power2.inOut',
-    })
-    .to(pivot.rotation, {
-      x: 0,
-      y: 0,
-      z: 0,
-      duration: duration * 0.22,
-      ease: 'back.out(2.2)',
-    })
+function closeSubmissionEnvelopeFlap(_immediate = false) {
+  resetSubmissionEnvelopeFlap()
 }
 
 function registerSubmissionEnvelope(root: THREE.Object3D) {
@@ -963,6 +754,7 @@ function resetSubmissionEnvelope() {
 function showSubmissionEnvelope() {
   if (!submissionEnvelope || !camera) return
   submissionEnvelopeTween?.kill()
+  resetSubmissionEnvelopeFlap()
   if (submissionEnvelopeReturnTimer) {
     clearTimeout(submissionEnvelopeReturnTimer)
     submissionEnvelopeReturnTimer = null
@@ -999,11 +791,6 @@ function showSubmissionEnvelope() {
       duration: flyDuration,
       ease: 'power3.out',
     }, 0)
-    .call(
-      () => openSubmissionEnvelopeFlap(),
-      [],
-      flyDuration + THREE.MathUtils.clamp(submissionEnvelopeDebug.flapOpenDelay, 0, 1.5),
-    )
 }
 
 function hideSubmissionEnvelope(onReturned?: () => void) {
@@ -1978,19 +1765,8 @@ function createCameraDebugGui(distance: number, target: THREE.Vector3) {
   submissionEnvelopeFolder
     .add(submissionEnvelopeDebug, 'successHold', 0, 5, 0.05)
     .name('成功停留 秒')
-  submissionEnvelopeFolder
-    .add(submissionEnvelopeDebug, 'flapAngle', -175, 175, 1)
-    .name('封口打开角度 °')
-  submissionEnvelopeFolder
-    .add(submissionEnvelopeDebug, 'flapDuration', 0.2, 2, 0.05)
-    .name('封口开合时长 秒')
-  submissionEnvelopeFolder
-    .add(submissionEnvelopeDebug, 'flapOpenDelay', 0, 1.5, 0.05)
-    .name('飞出后开启延迟 秒')
   submissionEnvelopeFolder.add(submissionEnvelopeActions, 'previewOut').name('预览信封飞出')
   submissionEnvelopeFolder.add(submissionEnvelopeActions, 'previewReturn').name('预览信封收回')
-  submissionEnvelopeFolder.add(submissionEnvelopeActions, 'previewOpen').name('预览信封打开')
-  submissionEnvelopeFolder.add(submissionEnvelopeActions, 'previewClose').name('预览信封关闭')
   submissionEnvelopeFolder.add(submissionEnvelopeActions, 'printCurrent').name('输出信封参数')
 
   const pushedTreeFolder = debugGui.addFolder('浣熊推树动画')
@@ -2710,8 +2486,8 @@ function cachePaperFacePoints(paper: THREE.Mesh) {
   paperVisibleFacePoints = []
   if (
     !bounds
-    || !(positions instanceof THREE.BufferAttribute)
-    || !(normals instanceof THREE.BufferAttribute)
+    || !positions
+    || !normals
   ) return
 
   const depth = Math.max(bounds.max.z - bounds.min.z, 0.00001)
@@ -2740,9 +2516,8 @@ function cachePaperFacePoints(paper: THREE.Mesh) {
 
     largestSurfaceArea = surfaceArea
     paperVisibleFaceZ = cluster.reduce((sum, facePoint) => sum + facePoint.z, 0) / cluster.length
-    // The projected extrema of this flat sheet are fully described by four
-    // corners. Keeping every source vertex made the DOM bookmark positioning
-    // loop transform hundreds of redundant points on every frame.
+    // Four corners fully describe this flat surface and keep the projection
+    // pass cheap even if a future model contains a much denser paper mesh.
     paperVisibleFacePoints = [
       new THREE.Vector3(surfaceBounds.min.x, surfaceBounds.min.y, paperVisibleFaceZ),
       new THREE.Vector3(surfaceBounds.min.x, surfaceBounds.max.y, paperVisibleFaceZ),
@@ -2753,13 +2528,23 @@ function cachePaperFacePoints(paper: THREE.Mesh) {
 }
 
 function updateVenueSelectorPosition() {
-  const positioningLayer = venueSelector.value ?? applicationTab.value?.parentElement
+  // Elements rendered through Transition can exist before Vue refreshes their
+  // template refs. Resolve them from the mounted page as a fallback so a missed
+  // ref update never leaves the edge tabs at their unpositioned default.
+  const pageRoot = viewport.value?.parentElement
+  const currentVenueSelector = venueSelector.value
+    ?? pageRoot?.querySelector<HTMLElement>('.venue-floating-selector')
+    ?? null
+  const currentApplicationTab = applicationTab.value
+    ?? pageRoot?.querySelector<HTMLButtonElement>('.application-edge-tab')
+    ?? null
+  const positioningLayer = currentVenueSelector ?? currentApplicationTab?.parentElement
   if (
     !positioningLayer
     || !paperSurfaceMesh
     || !renderer
     || !camera
-    || (!venueSelectorReady.value && !applicationTab.value)
+    || (!venueSelectorReady.value && !currentApplicationTab)
   ) return
 
   const selectorBounds = positioningLayer.getBoundingClientRect()
@@ -2771,6 +2556,7 @@ function updateVenueSelectorPosition() {
   if (!paperBounds) return
 
   paperSurfaceMesh.updateWorldMatrix(true, false)
+  camera.updateMatrixWorld(true)
   let minX = Number.POSITIVE_INFINITY
   let maxX = Number.NEGATIVE_INFINITY
   let minY = Number.POSITIVE_INFINITY
@@ -2828,7 +2614,7 @@ function updateVenueSelectorPosition() {
     venueTabDebug.right3Y,
     venueTabDebug.right4Y,
   ]
-  const venueButtons = venueSelector.value?.querySelectorAll<HTMLElement>('.venue-float-button') ?? []
+  const venueButtons = currentVenueSelector?.querySelectorAll<HTMLElement>('.venue-float-button') ?? []
 
   venueButtons.forEach((venueButton, index) => {
     const isLeft = index % 2 === 0
@@ -2846,13 +2632,45 @@ function updateVenueSelectorPosition() {
     // simulated depth occlusion in this DOM version.
     venueButton.style.left = `${isLeft ? minX + venueTabDebug.leftX : maxX + venueTabDebug.rightX}px`
     venueButton.style.top = `${minY + paperHeight * verticalRatio + sideOffsetY + itemOffsetY}px`
+    venueButton.style.visibility = 'visible'
   })
 
-  if (applicationTab.value) {
-    applicationTab.value.style.left = `${maxX - 5}px`
-    applicationTab.value.style.top = `${minY + paperHeight * 0.86}px`
+  if (currentApplicationTab) {
+    currentApplicationTab.style.left = `${maxX - 5}px`
+    currentApplicationTab.style.top = `${minY + paperHeight * 0.86}px`
+    currentApplicationTab.style.visibility = 'visible'
   }
 }
+
+async function scheduleVenueSelectorPositionUpdate() {
+  await nextTick()
+  updateVenueSelectorPosition()
+
+  // Transition inserts its child asynchronously, while camera completion and
+  // page changes can be coalesced into the same Vue update. Short timer-based
+  // retries also work in background tabs where requestAnimationFrame pauses.
+  for (const delay of [50, 180, 500]) {
+    const timer = setTimeout(() => {
+      updateVenueSelectorPosition()
+      selectorPositionTimers = selectorPositionTimers.filter((entry) => entry !== timer)
+    }, delay)
+    selectorPositionTimers.push(timer)
+  }
+}
+
+watch(
+  [loginSucceeded, folderPage, cinematicActive, applicationStageActive, venueSelectorReady],
+  scheduleVenueSelectorPositionUpdate,
+  { flush: 'post' },
+)
+
+// Template refs are assigned after Transition has mounted its child. Watching
+// the actual DOM refs guarantees a positioning pass at that moment.
+watch(
+  [applicationTab, venueSelector],
+  scheduleVenueSelectorPositionUpdate,
+  { flush: 'post' },
+)
 
 function animate(now = performance.now()) {
   if (!renderer || !scene || !camera) return
@@ -2871,10 +2689,15 @@ function animate(now = performance.now()) {
     || submissionEnvelopeFlapTween?.isActive()
     || submissionSignTween?.isActive(),
   )
-  const frameInterval = cinematicFrame ? CINEMATIC_FRAME_INTERVAL : IDLE_FRAME_INTERVAL
+  // Animated camera and envelope sequences follow the display refresh rate so
+  // their easing is not made uneven by a secondary FPS cap. Only the static
+  // scene remains throttled to reduce heat and power usage.
+  const frameInterval = cinematicFrame ? 0 : IDLE_FRAME_INTERVAL
   const sinceLastFrame = now - lastRenderedAt
-  if (sinceLastFrame < frameInterval) return
-  lastRenderedAt = now - (sinceLastFrame % frameInterval)
+  if (frameInterval > 0 && sinceLastFrame < frameInterval) return
+  lastRenderedAt = frameInterval > 0
+    ? now - (sinceLastFrame % frameInterval)
+    : now
 
   const elapsed = now * 0.001
   for (const shader of windShaders) shader.time.value = elapsed
@@ -3380,13 +3203,19 @@ onMounted(() => {
 
       clipboardModel.traverse((child) => {
         if (!(child instanceof THREE.Mesh)) return
-        if (child.name === 'Downloaded_Clipboard_Mesh_1') {
+        const materials = Array.isArray(child.material) ? child.material : [child.material]
+        // glTF optimization may rename the generated child mesh for a
+        // multi-primitive node. Identify the actual sheet by its stable
+        // material instead of the loader-generated "..._Mesh_1" name, or the
+        // DOM edge tabs will never receive projected paper coordinates.
+        const isParchmentSurface = child !== topPage
+          && materials.some((material) => material.name === 'Clean_Yellow_Parchment')
+        if (isParchmentSurface) {
           paperSurfaceMesh = child
           cachePaperFacePoints(child)
         }
         child.castShadow = true
         child.receiveShadow = true
-        const materials = Array.isArray(child.material) ? child.material : [child.material]
         materials.forEach(fixCutoutMaterial)
 
         // Paint the Canvas content into the clipboard's original paper material.
@@ -3455,6 +3284,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   cancelAnimationFrame(animationFrame)
+  selectorPositionTimers.forEach(clearTimeout)
+  selectorPositionTimers = []
   stopSmsCountdown()
   revokeRegistrationCaptcha()
   submissionEnvelopeTween?.kill()
@@ -5178,6 +5009,7 @@ onBeforeUnmount(() => {
 .application-edge-tab {
   position: absolute;
   z-index: 5;
+  visibility: hidden;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -5362,6 +5194,7 @@ onBeforeUnmount(() => {
   --venue-rotation: 0deg;
   --venue-shift-x: 0%;
   position: absolute;
+  visibility: hidden;
   display: flex;
   align-items: center;
   min-width: 142px;
