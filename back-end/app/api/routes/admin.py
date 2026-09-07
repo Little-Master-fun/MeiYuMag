@@ -22,6 +22,8 @@ from app.schemas.auth import UserRead, UserUpdateRequest
 from app.services.email import email_service
 from app.services.expiration import expiration_service
 from app.services.notification import notification_service
+from app.services.application_workflow import FILE_LABELS, TRANSITIONS, signed_file_types, latest_files
+from app.api.routes.applications import application_read_with_review_reason
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -41,7 +43,7 @@ async def update_reservation_statuses(
     reservation_status: str,
 ) -> None:
     result = await db.execute(
-        select(ReservationCalendar).where(ReservationCalendar.application_id == application_id)
+        select(ReservationCalendar).where(ReservationCalendar.application_id == application_id, ReservationCalendar.status != "cancelled")
     )
     for reservation in result.scalars():
         reservation.status = reservation_status
@@ -77,7 +79,7 @@ async def list_all_applications(
         query = query.where(Application.application_type == application_type)
     query = query.order_by(Application.created_at.desc())
     result = await db.execute(query)
-    return [ApplicationRead.model_validate(item) for item in result.scalars()]
+    return [await application_read_with_review_reason(db, item) for item in result.scalars()]
 
 
 @router.patch("/applications/{application_id}/status", response_model=ApplicationRead)
@@ -87,25 +89,35 @@ async def update_application_status(
     current_admin: Annotated[User, Depends(get_current_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ApplicationRead:
-    application = await db.get(Application, application_id)
+    application = await db.get(Application, application_id, with_for_update=True)
     if application is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
     if payload.status not in ADMIN_SETTABLE_APPLICATION_STATUSES:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported status")
 
+    if payload.status not in TRANSITIONS.get(application.status, set()):
+        raise HTTPException(409, "当前状态不允许此操作，请刷新申请后重试")
+    if payload.status == "rejected" and not (payload.reason or "").strip():
+        raise HTTPException(400, "请填写未通过原因")
+    if payload.status in {"submitted", "completed"}:
+        latest = await latest_files(db, application_id)
+        required = signed_file_types(application.application_type)
+        if any(key not in latest or latest[key].review_status in {"rejected", "failed"} for key in required):
+            raise HTTPException(409, "签章材料缺失或仍有待补交文件，不能确认")
+        for item in latest.values():
+            if item.review_status == "pending_admin_review":
+                item.review_status = "passed"
+                item.reject_reason = None
+
     application.status = payload.status
+    application.decision_reason = payload.reason
     if payload.status in {"submitted", "completed"} and application.venue_id is not None:
         await update_reservation_statuses(db, application_id, "confirmed")
     elif payload.status in {"cancelled", "rejected"} and application.venue_id is not None:
         await update_reservation_statuses(db, application_id, "cancelled")
-    if payload.reason:
-        pre_review_file = await latest_application_file(db, application_id, "pre_review_word")
-        if pre_review_file is not None:
-            pre_review_file.reject_reason = payload.reason
-
     await db.commit()
     await db.refresh(application)
-    return ApplicationRead.model_validate(application)
+    return await application_read_with_review_reason(db, application)
 
 
 @router.post("/applications/{application_id}/pre-review-decision", response_model=ApplicationRead)
@@ -115,7 +127,7 @@ async def decide_pre_review_application(
     current_admin: Annotated[User, Depends(get_current_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ApplicationRead:
-    application = await db.get(Application, application_id)
+    application = await db.get(Application, application_id, with_for_update=True)
     if application is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
     if application.status != "pending_admin_pre_review":
@@ -146,7 +158,8 @@ async def decide_pre_review_application(
                 ),
             )
     else:
-        application.status = "rejected"
+        application.status = "ai_rejected"
+        application.decision_reason = payload.reason or "请修正申请材料后重新提交"
         if pre_review_file is not None:
             pre_review_file.review_status = "rejected"
             pre_review_file.reject_reason = payload.reason
@@ -164,9 +177,19 @@ async def request_supplement(
     current_admin: Annotated[User, Depends(get_current_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> SupplementRequestResponse:
-    application = await db.get(Application, application_id)
+    application = await db.get(Application, application_id, with_for_update=True)
     if application is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
+
+    if application.status not in {"pending_admin_submit", "submitted", "supplement_required"}:
+        raise HTTPException(409, "当前申请不能要求补交材料")
+    allowed = set(signed_file_types(application.application_type)) | {"supporting_material"}
+    if application.application_type == "key_borrow":
+        allowed.add("key_borrow_application")
+    if len(set(payload.file_types)) != len(payload.file_types) or not set(payload.file_types) <= allowed:
+        raise HTTPException(400, "请选择该申请支持的材料类型")
+    application.requested_file_types = payload.file_types
+    application.decision_reason = payload.reason
 
     for file_type in payload.file_types:
         result = await db.execute(

@@ -66,6 +66,8 @@ class ApplicationRead(BaseModel):
     start_at: datetime | None
     end_at: datetime | None
     review_reason: str | None = None
+    requested_file_types: list[str] | None = None
+    required_files: list[dict[str, str]] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 

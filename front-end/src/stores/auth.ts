@@ -56,7 +56,29 @@ export const useAuthStore = defineStore('auth', () => {
     return config
   })
 
+  let refreshRequest: Promise<void> | null = null
+  let authRevision = 0
+  axios.interceptors.response.use(response => response, async requestError => {
+    const config = requestError.config
+    if (requestError.response?.status !== 401 || !config || config._retried || /\/auth\/(login|register|refresh)/.test(config.url ?? '') || !refreshToken.value) throw requestError
+    config._retried = true
+    if (!refreshRequest) {
+      const revision = authRevision
+      refreshRequest = axios.post(`${API}/auth/refresh`, {refresh_token: refreshToken.value})
+        .then(({data}) => {
+          if (revision !== authRevision) throw new Error('当前登录已结束')
+          token.value = data.access_token; refreshToken.value = data.refresh_token
+          localStorage.setItem('access_token', data.access_token)
+          localStorage.setItem('refresh_token', data.refresh_token)
+        }).catch(error => { if (revision === authRevision) logout(); throw error }).finally(() => { refreshRequest = null })
+    }
+    await refreshRequest
+    config.headers.Authorization = `Bearer ${token.value}`
+    return axios(config)
+  })
+
   function saveAuth(data: AuthResponse) {
+    authRevision++
     token.value = data.access_token
     refreshToken.value = data.refresh_token
     user.value = data.user
@@ -154,11 +176,13 @@ export const useAuthStore = defineStore('auth', () => {
 
   async function fetchMe(): Promise<boolean> {
     if (!token.value) return false
+    const revision = authRevision
     loading.value = true
     error.value = null
 
     try {
       const { data } = await axios.get<User>(`${API}/auth/me`)
+      if (revision !== authRevision) return false
       user.value = data
       return true
     } catch (requestError: any) {
@@ -170,6 +194,7 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   function logout() {
+    authRevision++
     token.value = null
     refreshToken.value = null
     user.value = null

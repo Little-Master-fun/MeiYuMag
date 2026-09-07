@@ -57,8 +57,7 @@ export interface VenueUsageBoard {
 
 export type ParchmentPageAction =
   | { type: 'switch-page'; page: 'profile' | 'calendar' }
-  | { type: 'resubmit'; application: PersonalApplicationItem }
-  | { type: 'supplement'; application: PersonalApplicationItem }
+  | { type: 'detail'; application: PersonalApplicationItem }
 
 export interface ParchmentPageCanvas {
   texture: THREE.CanvasTexture
@@ -884,9 +883,10 @@ const personalStatusStyles: Record<string, { label: string; color: string; text:
   pending_signed: { label: '待签章材料', color: '#ad8248', text: '#765525' },
   pending_admin_pre_review: { label: '等待人工初审', color: '#737583', text: '#515361' },
   pending_admin: { label: '等待管理员', color: '#737583', text: '#515361' },
-  pending_admin_submit: { label: '等待提交', color: '#60745f', text: '#394c3b' },
+  pending_admin_submit: { label: '待管理员审核', color: '#60745f', text: '#394c3b' },
   supplement_required: { label: '需要补交', color: '#9a6152', text: '#743f34' },
   admin_submitted: { label: '已提交', color: '#60745f', text: '#394c3b' },
+  submitted: { label: '已审核确认', color: '#60745f', text: '#394c3b' },
   completed: { label: '已完成', color: '#60745f', text: '#394c3b' },
   cancelled: { label: '已取消', color: '#8b8477', text: '#5f594f' },
 }
@@ -917,7 +917,7 @@ function drawPersonalApplicationRow(
 ) {
   const height = compact ? 76 : 96
   roundedRect(ctx, 120, y, 784, height, 17)
-  const needsUserAction = ['supplement_required', 'ai_rejected'].includes(application.status)
+  const needsUserAction = ['supplement_required', 'ai_rejected', 'pending_signed_files'].includes(application.status)
   ctx.fillStyle = needsUserAction
     ? 'rgba(154, 97, 82, 0.09)'
     : 'rgba(255, 252, 239, 0.22)'
@@ -955,7 +955,7 @@ function drawPersonalApplicationRow(
     ctx.fillStyle = '#fbf2dc'
     ctx.font = '600 19px "Songti SC", "STSong", serif'
     ctx.fillText(
-      application.status === 'ai_rejected' ? '重新提交  →' : '补交材料  →',
+      application.status === 'ai_rejected' ? '重新提交  →' : application.status === 'pending_signed_files' ? '签章材料  →' : '补交材料  →',
       797,
       y + 56,
     )
@@ -1020,7 +1020,7 @@ function drawPersonalHomeBoard(
   const profile = board.profile
   const groups = getPersonalApplicationGroups(board)
   const actionRequiredCount = (board.applications ?? []).filter(
-    (application) => ['supplement_required', 'ai_rejected'].includes(application.status),
+    (application) => ['supplement_required', 'ai_rejected', 'pending_signed_files'].includes(application.status),
   ).length
   roundedRect(ctx, 120, 430, 784, 132, 22)
   ctx.fillStyle = 'rgba(255, 252, 239, 0.26)'
@@ -1417,23 +1417,24 @@ export function createParchmentPageCanvas(maxAnisotropy: number): ParchmentPageC
     }
     if (board.mode !== 'profile' || board.state !== 'ready') return null
 
-    const { active } = getPersonalApplicationGroups(board)
+    const { active, history } = getPersonalApplicationGroups(board)
     const firstRowY = 788
     for (let index = 0; index < active.length; index += 1) {
       const application = active[index]
       const rowY = firstRowY + index * 112
       if (
-        ['supplement_required', 'ai_rejected'].includes(application?.status ?? '')
-        && canvasX >= 120
+        application && canvasX >= 120
         && canvasX <= 904
         && contentY >= rowY
         && contentY <= rowY + 96
       ) {
-        if (application?.status === 'ai_rejected') {
-          return { type: 'resubmit', application }
-        }
-        return { type: 'supplement', application }
+        return { type: 'detail', application }
       }
+    }
+    const historyStart = firstRowY + (active.length ? active.length * 112 : 94) + 58
+    for (let i = 0; i < history.length; i++) {
+      const application = history[i]!
+      if (canvasX >= 120 && canvasX <= 904 && contentY >= historyStart + i * 92 && contentY <= historyStart + i * 92 + 76) return { type: 'detail', application }
     }
     return null
   }

@@ -70,6 +70,7 @@ async def create_key_borrow_application(
             detail="Key borrowing application must be a PDF file",
         )
 
+    await file_storage_service.validate_batch([file])
     ai_result = await key_ai_review_service.extract_key_borrow_info(file)
     auth_profile_result = await db.execute(
         select(AuthProfile).where(AuthProfile.user_id == current_user.id)

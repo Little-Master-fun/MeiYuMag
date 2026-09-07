@@ -7,3 +7,6 @@ class ApplicationTemplateRead(BaseModel):
     application_type: str
     file_type: str
     download_url: str
+    kind: str = "template"
+    description: str = ""
+    aliases: list[str] = []

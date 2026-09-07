@@ -1,5 +1,13 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+  type CSSProperties,
+} from 'vue'
 import * as THREE from 'three'
 import { gsap } from 'gsap'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
@@ -80,12 +88,63 @@ import {
   getSubmissionGuide,
   mergeSubmissionFiles,
   uploadApplicationFiles,
+  validateSubmission,
 } from '@/features/forest-portal/submission'
+import WorkflowDesk from './components/WorkflowDesk.vue'
+import ApplicationGuide from './components/ApplicationGuide.vue'
+import { downloadRequirement } from './materialLibrary'
+import type { SubmissionRequirement } from './submission'
+import { useRoute, useRouter } from 'vue-router'
+
+const route = useRoute()
+const router = useRouter()
+
+const desk = ref<{ mode: 'personal' | 'admin' | 'new'; applicationId?: number; initialVenueId?: number; initialDate?: string } | null>(null)
+const applicationGuideOpen = ref(false)
+const downloadingRequirement = ref('')
+const materialDownloadMessage = ref('')
+async function downloadSignMaterial(requirement: SubmissionRequirement) {
+  if (!submissionContext.value || downloadingRequirement.value) return
+  downloadingRequirement.value = requirement.label
+  materialDownloadMessage.value = '正在取出材料…'
+  try {
+    const item = await downloadRequirement(requirement, submissionContext.value)
+    materialDownloadMessage.value = `${item.name} 已开始下载${requirement.fileType?.includes('signed') ? '；请填写并真实签章后扫描提交。' : '；请替换为实际申请信息。'}`
+  } catch (error) {
+    materialDownloadMessage.value = error instanceof Error && !('isAxiosError' in error)
+      ? error.message : '材料下载失败，请稍后点击重试。'
+  } finally { downloadingRequirement.value = '' }
+}
+function submitFromDesk(target: ApplicationNavigationTarget) {
+  desk.value = null
+  playApplicationCamera(target)
+}
+function logoutPortal() {
+  auth.logout()
+  desk.value = null
+  loginSucceeded.value = false
+  resetVenueBoards()
+  pageContentCanvas?.updateUsageBoard({mode: 'profile', state: 'loading', venues: [], applications: [], date: getLocalDateKey(new Date())})
+  Object.assign(clipboardDebug, clipboardHomeTransform)
+  applyClipboardTransform()
+  playCameraEntrance()
+}
+async function restorePortalSession() {
+  if (!auth.token || loginSucceeded.value) return
+  if (await auth.fetchMe()) {
+    loginSucceeded.value = true
+    folderPage.value = 'profile'
+    void loadPersonalHome()
+    playPostLoginCamera()
+  }
+}
 
 const viewport = ref<HTMLDivElement | null>(null)
 const venueSelector = ref<HTMLElement | null>(null)
 const applicationTab = ref<HTMLButtonElement | null>(null)
 const applicationFileInput = ref<HTMLInputElement | null>(null)
+const submissionCacheBubble = ref<HTMLElement | null>(null)
+const submissionBubbleStyle = ref<CSSProperties>({ visibility: 'hidden' })
 const loadingProgress = ref(0)
 const loadError = ref('')
 const modelReady = ref(false)
@@ -157,6 +216,7 @@ let submissionSignTargetY = 0
 let resizeObserver: ResizeObserver | null = null
 let animationFrame = 0
 let selectorPositionTimers: Array<ReturnType<typeof setTimeout>> = []
+let lastSubmissionBubbleLayout = 'hidden'
 let lastRenderedAt = 0
 let lastVenuePositionUpdateAt = 0
 let lastCameraReadoutUpdateAt = 0
@@ -195,11 +255,11 @@ const submissionGuide = computed(() =>
   submissionContext.value ? getSubmissionGuide(submissionContext.value) : null,
 )
 const submissionHasPrimaryFile = computed(() =>
-  pendingSubmissionFiles.value.some(({ file }) => file.name.toLowerCase().endsWith('.docx')),
+  pendingSubmissionFiles.value.some(({ file }) => file.name.toLowerCase().endsWith(submissionContext.value?.mode === 'key' ? '.pdf' : '.docx')),
 )
 const submissionRequirementsSatisfied = computed(() => {
   if (!submissionContext.value || pendingSubmissionFiles.value.length === 0) return false
-  return submissionContext.value.mode === 'supplement' || submissionHasPrimaryFile.value
+  return !validateSubmission(submissionContext.value, pendingSubmissionFiles.value)
 })
 const submissionCacheSize = computed(() =>
   pendingSubmissionFiles.value.reduce((total, item) => total + item.file.size, 0),
@@ -608,6 +668,92 @@ function isPointerOverSubmissionEnvelope(clientX: number, clientY: number) {
   return pageRaycaster.intersectObject(submissionEnvelope.object, true).length > 0
 }
 
+function updateSubmissionBubblePosition() {
+  const bubble = submissionCacheBubble.value
+  const envelope = submissionEnvelope?.object
+  if (
+    !bubble
+    || !envelope
+    || !camera
+    || !renderer
+    || !viewport.value
+    || !applicationStageActive.value
+    || submissionEnvelopeState === 'hidden'
+  ) {
+    if (lastSubmissionBubbleLayout !== 'hidden') {
+      lastSubmissionBubbleLayout = 'hidden'
+      submissionBubbleStyle.value = { visibility: 'hidden' }
+    }
+    return
+  }
+
+  envelope.updateWorldMatrix(true, true)
+  camera.updateMatrixWorld(true)
+  const rendererBounds = renderer.domElement.getBoundingClientRect()
+  const pageBounds = viewport.value.parentElement?.getBoundingClientRect() ?? rendererBounds
+  const projectedVertex = new THREE.Vector3()
+  let envelopeMinX = Number.POSITIVE_INFINITY
+  let envelopeMaxX = Number.NEGATIVE_INFINITY
+  let envelopeMaxY = Number.NEGATIVE_INFINITY
+  envelope.traverse((child) => {
+    if (!(child instanceof THREE.Mesh)) return
+    const positions = child.geometry.getAttribute('position')
+    if (!positions) return
+    for (let index = 0; index < positions.count; index += 1) {
+      const point = projectedVertex
+        .fromBufferAttribute(positions, index)
+        .applyMatrix4(child.matrixWorld)
+        .project(camera!)
+      const screenX = rendererBounds.left - pageBounds.left
+        + (point.x + 1) * rendererBounds.width * 0.5
+      const screenY = rendererBounds.top - pageBounds.top
+        + (1 - point.y) * rendererBounds.height * 0.5
+      envelopeMinX = Math.min(envelopeMinX, screenX)
+      envelopeMaxX = Math.max(envelopeMaxX, screenX)
+      envelopeMaxY = Math.max(envelopeMaxY, screenY)
+    }
+  })
+  if (!Number.isFinite(envelopeMinX) || !Number.isFinite(envelopeMaxX)) return
+  envelopeMinX = Math.max(0, envelopeMinX)
+  envelopeMaxX = Math.min(pageBounds.width, envelopeMaxX)
+  envelopeMaxY = Math.min(pageBounds.height, envelopeMaxY)
+  const envelopeCenterX = (envelopeMinX + envelopeMaxX) * 0.5
+  const bubbleWidth = bubble.offsetWidth || 410
+  const bubbleHeight = bubble.offsetHeight || 220
+  const edgeInset = Math.min(24, pageBounds.width * 0.025)
+
+  // Center the note under the visible envelope so it reads as that envelope's
+  // contents. Projecting the actual vertices avoids the empty corners of a
+  // rotated 3D bounding box shifting the apparent center under perspective.
+  const preferredLeft = envelopeCenterX - bubbleWidth * 0.5
+  const left = THREE.MathUtils.clamp(
+    preferredLeft,
+    edgeInset,
+    Math.max(edgeInset, pageBounds.width - bubbleWidth - edgeInset),
+  )
+  const top = THREE.MathUtils.clamp(
+    envelopeMaxY + 12,
+    132,
+    Math.max(132, pageBounds.height - bubbleHeight - edgeInset),
+  )
+  const tailCenter = THREE.MathUtils.clamp(
+    envelopeCenterX - left,
+    38,
+    Math.max(38, bubbleWidth - 38),
+  )
+
+  const layoutKey = `${Math.round(left)}:${Math.round(top)}:${Math.round(tailCenter)}`
+  if (layoutKey === lastSubmissionBubbleLayout) return
+  lastSubmissionBubbleLayout = layoutKey
+
+  submissionBubbleStyle.value = {
+    visibility: 'visible',
+    left: `${Math.round(left)}px`,
+    top: `${Math.round(top)}px`,
+    '--submission-tail-x': `${Math.round(tailCenter)}px`,
+  } as CSSProperties
+}
+
 function openSubmissionFilePicker() {
   if (
     submissionFilesUploading.value
@@ -623,6 +769,10 @@ function stageSubmissionFiles(files: File[]) {
   for (const message of result.errors) showSubmissionNotice('error', message, 3600)
   if (!result.acceptedCount) return
   pendingSubmissionFiles.value = result.files
+  // Only a single-item checklist is unambiguous; multi-item submissions are explicitly labelled by the user.
+  if (submissionContext.value?.requiredFiles?.length === 1) {
+    for (const item of pendingSubmissionFiles.value) item.fileType ??= submissionContext.value.requiredFiles[0]!.file_type
+  }
   closeSubmissionEnvelopeFlap()
   setSubmissionEnvelopeState(
     'ready',
@@ -647,9 +797,9 @@ async function submitStagedApplicationFiles() {
   if (
     !target
     || submissionFilesUploading.value
-    || (target.mode !== 'supplement' && target.venueId <= 0)
+    || (!['supplement', 'key'].includes(target.mode ?? '') && target.venueId <= 0)
   ) return
-  if (['resubmit', 'supplement'].includes(target.mode ?? '') && !target.applicationId) {
+  if (['resubmit', 'supplement', 'signed'].includes(target.mode ?? '') && !target.applicationId) {
     showSubmissionNotice('error', '当前申请信息不完整，请返回个人首页后重试', 3800)
     return
   }
@@ -659,11 +809,9 @@ async function submitStagedApplicationFiles() {
     showSubmissionNotice('error', message, 3800)
     return
   }
-  const primaryItem = pendingSubmissionFiles.value.find(({ file }) =>
-    file.name.toLowerCase().endsWith('.docx'),
-  )
-  if (target.mode !== 'supplement' && !primaryItem) {
-    const message = 'AI 初审需要一份 .docx 格式的场地申请表'
+  const validation = validateSubmission(target, pendingSubmissionFiles.value)
+  if (validation) {
+    const message = validation
     setSubmissionEnvelopeState('error', message)
     showSubmissionNotice('error', message, 3800)
     return
@@ -677,6 +825,8 @@ async function submitStagedApplicationFiles() {
     'uploading',
     target.mode === 'supplement'
       ? `正在上传 ${fileCount} 份补交材料`
+      : target.mode === 'signed' || target.mode === 'key'
+        ? `正在递交 ${fileCount} 份申请材料`
       : target.mode === 'resubmit'
         ? `正在重新提交 ${fileCount} 个文件并进行 AI 初审`
       : `正在提交 ${fileCount} 个文件并进行材料初审`,
@@ -1416,14 +1566,16 @@ function playCameraEntrance() {
   updateCameraEntrance(performance.now())
 }
 
-function playPostLoginCamera() {
+function playPostLoginCamera(preserveSubmissionDraft = false) {
   if (!camera || !controls) return
 
   cameraFlight = null
   applicationFlight = null
-  selectedApplicationTarget = null
-  submissionContext.value = null
-  pendingSubmissionFiles.value = []
+  if (!preserveSubmissionDraft) {
+    selectedApplicationTarget = null
+    submissionContext.value = null
+    pendingSubmissionFiles.value = []
+  }
   submissionFilesUploading.value = false
   applicationStageActive.value = false
   resetSubmissionEnvelope()
@@ -1479,7 +1631,10 @@ function playPostLoginCamera() {
   }
 }
 
-function playApplicationCamera(target: ApplicationNavigationTarget) {
+function playApplicationCamera(
+  target: ApplicationNavigationTarget,
+  preserveSubmissionDraft = false,
+) {
   if (!camera || !controls || !clipboardModel || cinematicActive.value) return
 
   cameraFlight = null
@@ -1489,7 +1644,7 @@ function playApplicationCamera(target: ApplicationNavigationTarget) {
   clearSubmissionNotice()
   selectedApplicationTarget = target
   submissionContext.value = target
-  pendingSubmissionFiles.value = []
+  if (!preserveSubmissionDraft) pendingSubmissionFiles.value = []
   submissionFilesUploading.value = false
   applicationStageActive.value = true
   showSubmissionSign()
@@ -1575,6 +1730,20 @@ function replayApplicationCamera() {
     date: getLocalDateKey(offsetDate(new Date(), 1)),
   }
   requestAnimationFrame(() => playApplicationCamera(target))
+}
+
+function returnToFolderFromSubmission() {
+  if (
+    !applicationStageActive.value
+    || cinematicActive.value
+    || submissionFilesUploading.value
+  ) return
+
+  clearSubmissionNotice()
+  cinematicActive.value = true
+  if (controls) controls.enabled = false
+  hideSubmissionSign()
+  hideSubmissionEnvelope(() => playPostLoginCamera(true))
 }
 
 function easeInOutCubic(progress: number) {
@@ -1793,6 +1962,7 @@ function resizeRenderer() {
   camera.aspect = clientWidth / clientHeight
   camera.updateProjectionMatrix()
   updateSubmissionSignLayout()
+  updateSubmissionBubblePosition()
 }
 
 function handleSceneVisibilityChange() {
@@ -1900,31 +2070,15 @@ function handlePaperPointerLeave() {
 
 async function startNewVenueApplication() {
   if (applicationTabLoading.value) return
-  let venue = venueOptions.value.find((item) => item.id === selectedVenueId.value)
-    ?? venueOptions.value[0]
-    ?? venueUsageBoard.value?.venues[0]
-  if (!venue) {
-    applicationTabLoading.value = true
-    await loadVenueUsageBoard()
-    applicationTabLoading.value = false
-    venue = venueOptions.value.find((item) => item.id === selectedVenueId.value)
-      ?? venueOptions.value[0]
-      ?? venueUsageBoard.value?.venues[0]
-    if (!venue) {
-      showSubmissionNotice('error', '场地信息加载失败，请稍后再试', 3200)
-      return
-    }
+  if (submissionContext.value && selectedApplicationTarget) {
+    playApplicationCamera(selectedApplicationTarget, true)
+    return
   }
-  selectedVenueId.value = venue.id
-  playApplicationCamera({
-    venueId: venue.id,
-    venueName: venue.name,
-    date: getLocalDateKey(offsetDate(new Date(), 1)),
-    mode: 'new',
-  })
+  desk.value = { mode: 'new', initialVenueId: selectedVenueId.value ?? undefined }
 }
 
 function handlePaperClick(event: PointerEvent) {
+  if (desk.value) return
   if (isPointerOverSubmissionEnvelope(event.clientX, event.clientY)) {
     openSubmissionFilePicker()
     return
@@ -1937,36 +2091,14 @@ function handlePaperClick(event: PointerEvent) {
     switchFolderPage(action.page)
     return
   }
-  if (action?.type === 'resubmit') {
-    const application = action.application
-    playApplicationCamera({
-      venueId: application.venueId ?? 0,
-      venueName: application.venueName,
-      date: application.startAt
-        ? getLocalDateKey(new Date(application.startAt))
-        : getLocalDateKey(new Date()),
-      mode: 'resubmit',
-      applicationId: application.id,
-    })
-    return
-  }
-  if (action?.type === 'supplement') {
-    const application = action.application
-    playApplicationCamera({
-      venueId: application.venueId ?? 0,
-      venueName: application.venueName,
-      date: application.startAt
-        ? getLocalDateKey(new Date(application.startAt))
-        : getLocalDateKey(new Date()),
-      mode: 'supplement',
-      applicationId: application.id,
-    })
+  if (action?.type === 'detail') {
+    desk.value = {mode: 'personal', applicationId: action.application.id}
     return
   }
   const target = pageContentCanvas.getApplicationTarget(pointer.x, pointer.y)
   if (!target) return
 
-  playApplicationCamera(target)
+  desk.value = { mode: 'new', initialVenueId: target.venueId, initialDate: target.date }
 }
 
 function cachePaperFacePoints(paper: THREE.Mesh) {
@@ -2155,6 +2287,20 @@ watch(
   { flush: 'post' },
 )
 
+watch(submissionContext, () => { materialDownloadMessage.value = '' })
+
+watch([loginSucceeded, cinematicActive, () => route.fullPath], () => {
+  if (!loginSucceeded.value || cinematicActive.value || applicationStageActive.value) return
+  if (route.query.action === 'apply') {
+    const venueId = Number(route.query.venueId)
+    desk.value = {mode:'new', initialVenueId: venueId > 0 ? venueId : undefined, initialDate: typeof route.query.date === 'string' ? route.query.date : undefined}
+    void router.replace({path: '/login'})
+  } else if (Number(route.query.application) > 0) {
+    desk.value = {mode:'personal', applicationId:Number(route.query.application)}
+    void router.replace({path: '/login'})
+  }
+})
+
 // Template refs are assigned after Transition has mounted its child. Watching
 // the actual DOM refs guarantees a positioning pass at that moment.
 watch(
@@ -2200,6 +2346,7 @@ function animate(now = performance.now()) {
   const cameraIsMoving =
     updateCameraEntrance(now) || updatePostLoginCamera(now) || updateApplicationCamera(now)
   if (!cameraIsMoving && controls?.enabled) controls.update()
+  if (applicationStageActive.value) updateSubmissionBubblePosition()
 
   // Static scene shadows are cached. Refresh them only while the clipboard is
   // moving, then leave the completed map in place for subsequent frames.
@@ -2395,6 +2542,7 @@ onMounted(() => {
       applyHouseTransform()
       loadingProgress.value = 100
       modelReady.value = true
+      void restorePortalSession()
     })
     .catch((error) => {
       console.error('Failed to load GLB models', error)
@@ -2549,14 +2697,22 @@ onBeforeUnmount(() => {
             {{ submissionContext.applicationId ? `申请 #${submissionContext.applicationId}` : '新申请' }}
           </span>
         </div>
-        <div class="submission-guide-requirements">
-          <div
+        <div v-if="submissionGuide.requirements.length <= 2" class="submission-guide-requirements">
+          <button
             v-for="requirement in submissionGuide.requirements"
             :key="requirement.label"
+            type="button"
             class="submission-guide-requirement"
+            :disabled="!!downloadingRequirement"
+            :aria-label="`下载${requirement.label}示例或模板`"
+            :title="`点击下载${requirement.label}的填写示例或原表；签章材料须自行填写签章后扫描`"
+            @pointerdown.stop
+            @click.stop="downloadSignMaterial(requirement)"
             :class="{
               fulfilled:
-                requirement.kind === 'optional'
+                requirement.fileType
+                  ? pendingSubmissionFiles.some(item => item.fileType === requirement.fileType)
+                  : requirement.kind === 'optional'
                   ? pendingSubmissionFiles.length > 1
                   : requirement.kind === 'any'
                     ? pendingSubmissionFiles.length > 0
@@ -2566,20 +2722,50 @@ onBeforeUnmount(() => {
             <FileText :size="17" :stroke-width="1.55" />
             <span>
               <strong>{{ requirement.label }}</strong>
-              <small>{{ requirement.extension }}</small>
+              <small>{{ downloadingRequirement === requirement.label ? '正在取阅…' : `${requirement.extension} · 点击取阅 ↓` }}</small>
             </span>
             <i aria-hidden="true" />
-          </div>
+          </button>
         </div>
-        <p>{{ submissionGuide.description }}</p>
+        <details v-else class="sign-material-menu" @pointerdown.stop @click.stop @wheel.stop>
+          <summary><FileText :size="22" /><span>材料清单 · {{ submissionGuide.requirements.length }} 项<small>展开取阅示例与模板 ↓</small></span></summary>
+          <div class="sign-material-sheet">
+            <small>材料原表与填写参考</small>
+            <button v-for="requirement in submissionGuide.requirements" :key="requirement.label" type="button" :disabled="!!downloadingRequirement" :aria-label="`下载${requirement.label}示例或模板`" @click="downloadSignMaterial(requirement)">
+              <span>{{ requirement.label }}</span><span aria-hidden="true">↓</span>
+            </button>
+            <p>签章扫描件：下载对应原表，填写并签章后扫描。</p>
+          </div>
+        </details>
+        <p role="status" :class="{ 'material-feedback': materialDownloadMessage }" :title="materialDownloadMessage || submissionGuide.description">{{ materialDownloadMessage || submissionGuide.description }}</p>
       </aside>
+    </Transition>
+
+    <aside v-if="applicationStageActive && materialDownloadMessage" class="material-download-note" role="status">
+      <span>{{ materialDownloadMessage }}</span>
+      <button type="button" aria-label="收起下载提示" @pointerdown.stop @click.stop="materialDownloadMessage = ''">×</button>
+    </aside>
+
+    <Transition name="submission-return-sign">
+      <button
+        v-if="applicationStageActive && submissionContext"
+        type="button"
+        class="submission-return-sign"
+        :disabled="cinematicActive || submissionFilesUploading"
+        aria-label="返回文件夹"
+        @click.stop="returnToFolderFromSubmission"
+      >
+        <span class="submission-return-arrow" aria-hidden="true" />
+      </button>
     </Transition>
 
     <Transition name="submission-cache">
       <aside
         v-if="applicationStageActive && submissionContext"
+        ref="submissionCacheBubble"
         class="submission-cache-bubble"
         :class="{ empty: pendingSubmissionFiles.length === 0 }"
+        :style="submissionBubbleStyle"
         aria-label="待提交文件缓存"
       >
         <span class="submission-cache-tail" aria-hidden="true" />
@@ -2591,6 +2777,10 @@ onBeforeUnmount(() => {
           <em>{{ pendingSubmissionFiles.length }} 份 · {{ formatSubmissionFileSize(submissionCacheSize) }}</em>
         </header>
 
+        <details v-if="submissionContext?.requiredFiles?.length" class="envelope-checklist">
+          <summary>递交清单 · {{ submissionContext.requiredFiles.filter(r => pendingSubmissionFiles.filter(f => f.fileType === r.file_type).length === 1).length }} / {{ submissionContext.requiredFiles.length }} 项</summary>
+          <p v-for="r in submissionContext.requiredFiles" :key="r.file_type">{{ pendingSubmissionFiles.some(item => item.fileType === r.file_type) ? '✓' : '○' }} {{ r.label }}</p>
+        </details>
         <div v-if="pendingSubmissionFiles.length" class="submission-cache-list">
           <article
             v-for="(item, index) in pendingSubmissionFiles"
@@ -2601,6 +2791,10 @@ onBeforeUnmount(() => {
             <span class="submission-cache-name">
               <strong>{{ item.file.name }}</strong>
               <small>{{ getSubmissionFileExtension(item.file.name) }} · {{ formatSubmissionFileSize(item.file.size) }}</small>
+              <select v-if="submissionContext?.requiredFiles?.length" v-model="item.fileType" class="material-purpose" :disabled="submissionFilesUploading" :aria-label="`${item.file.name} 的材料用途`">
+                <option :value="undefined" disabled>选择材料用途</option>
+                <option v-for="requirement in submissionContext.requiredFiles" :key="requirement.file_type" :value="requirement.file_type">{{ requirement.label }}</option>
+              </select>
             </span>
             <button
               type="button"
@@ -2618,6 +2812,7 @@ onBeforeUnmount(() => {
         </p>
 
         <footer>
+          <small v-if="pendingSubmissionFiles.length && !submissionRequirementsSatisfied" class="submission-validation-note">{{ validateSubmission(submissionContext, pendingSubmissionFiles) }}</small>
           <button
             type="button"
             class="submission-cache-add"
@@ -2954,6 +3149,19 @@ onBeforeUnmount(() => {
       </section>
     </Transition>
 
+    <nav v-if="loginSucceeded && !cinematicActive && !applicationStageActive" class="forest-desk-tabs" aria-label="档案工具">
+      <button @click="applicationGuideOpen = true">使用指南</button>
+      <button @click="desk = { mode: 'personal' }">申请档案</button>
+      <button v-if="auth.isAdmin" @click="desk = { mode: 'admin' }">审核台</button>
+      <button @click="logoutPortal">退出</button>
+    </nav>
+    <button v-if="applicationStageActive && !cinematicActive" class="submission-help-tab" @pointerdown.stop @click.stop="applicationGuideOpen = true">使用指南 · 示例</button>
+    <Transition name="dossier-fade">
+      <ApplicationGuide v-if="applicationGuideOpen" @close="applicationGuideOpen = false" />
+    </Transition>
+    <Transition name="dossier-fade">
+      <WorkflowDesk v-if="desk" v-bind="desk" @close="desk = null" @submit="submitFromDesk" @refresh="loadPersonalHome(); loadVenueUsageBoard()" />
+    </Transition>
     <Transition name="application-tab">
       <button
         v-if="loginSucceeded && folderPage === 'profile' && !cinematicActive && !applicationStageActive"
@@ -3013,6 +3221,19 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.submission-validation-note { flex-basis: 100%; color: #95654d; font: 11px/1.5 'Songti SC', serif; }
+.submission-cache-bubble footer { flex-wrap: wrap; gap: 8px; }
+.checklist-summary { align-items: center; font: 13px 'Songti SC', serif; line-height: 1.7; }
+.checklist-summary small { opacity: .7; font-size: 11px; }
+.envelope-checklist { flex-shrink: 0; max-height: 100px; overflow: auto; font: 12px 'Songti SC', serif; color: #647454; margin: 8px 0; }
+.envelope-checklist summary { cursor: pointer; padding: 3px 0; }
+.envelope-checklist p { margin: 6px 0; }
+.forest-desk-tabs { position: fixed; top: 18px; right: 20px; z-index: 30; display: flex; gap: 6px; }
+.forest-desk-tabs button { font: 14px 'Songti SC', serif; color: #59694f; background: #f2ebd4; border: 1px solid #aab29b; padding: 10px 16px; border-radius: 2px 3px 14px 4px; cursor: pointer; transition: transform .2s, background .2s; }
+.forest-desk-tabs button:hover { background: #e3e5cf; transform: translateY(3px); }
+.material-purpose { display: block; width: 100%; margin-top: 6px; padding: 4px 0; color: #60745f; border: 0; border-bottom: 1px dashed #9d9674; background: transparent; font: 13px 'Songti SC', serif; }
+.dossier-fade-enter-active, .dossier-fade-leave-active { transition: opacity .25s; }
+.dossier-fade-enter-from, .dossier-fade-leave-to { opacity: 0; }
 .model-page {
   position: relative;
   width: 100vw;
@@ -3238,6 +3459,10 @@ onBeforeUnmount(() => {
 }
 
 .submission-guide-requirement {
+  pointer-events: auto;
+  cursor: pointer;
+  text-align: left;
+  transition: background .2s, transform .2s;
   display: grid;
   grid-template-columns: 20px minmax(0, 1fr) 8px;
   gap: 7px;
@@ -3250,6 +3475,22 @@ onBeforeUnmount(() => {
   color: rgba(255, 238, 199, 0.68);
   box-shadow: inset 0 1px rgba(255, 248, 222, 0.09);
 }
+
+.submission-guide-requirement:hover { background: rgb(220 215 166 / 20%); transform: translateY(-2px); }
+.submission-guide-requirement:focus-visible, .sign-material-menu summary:focus-visible { outline: 2px solid #e8dfaf; outline-offset: 3px; }
+.submission-guide-requirement:disabled { cursor: wait; opacity: .65; }
+.sign-material-menu { position: relative; pointer-events: auto; min-width: 0; color: #efe0b6; font-family: 'Songti SC',serif; }
+.sign-material-menu summary { display: flex; gap: 10px; align-items: center; padding: 8px; cursor: pointer; list-style: none; font-size: 13px; border-radius: 5px; background: #32231426; }
+.sign-material-menu summary::-webkit-details-marker { display: none; }
+.sign-material-menu summary small { display: block; margin-top: 6px; font-size: 10px; color: #d4c291; }
+.sign-material-sheet { position: absolute; top: calc(100% + 14px); right: 0; width: min(300px,70vw); box-sizing: border-box; padding: 19px; max-height: 55dvh; overflow-y: auto; overscroll-behavior: contain; background: linear-gradient(120deg,#f0e8cc,#e2d5ac); color: #615134; border: 1px solid #baa677; border-radius: 3px 5px 14px 4px; box-shadow: 0 12px 24px #26301c44; }
+.sign-material-sheet > small { display: block; color: #96825b; letter-spacing: .08em; margin-bottom: 8px; }
+.sign-material-sheet button { display: flex; justify-content: space-between; gap: 9px; width: 100%; text-align: left; padding: 10px 0; color: #5e704f; border: 0; border-bottom: 1px dashed #b7a27055; background: none; cursor: pointer; font: 13px 'Songti SC',serif; }
+.sign-material-sheet button:hover { color: #344b30; background: #d4d6b84d; }.sign-material-sheet button:disabled { opacity: .5; cursor: wait; }
+.sign-material-sheet p { position: static; margin: 12px 0 0; font-size: 11px; line-height: 1.7; color: #92794e; }
+.submission-help-tab { position: fixed; top: 110px; right: 20px; z-index: 25; background: #f2ebd4; color: #667451; padding: 9px 14px; border: 1px solid #aab29b; border-radius: 2px 3px 14px 4px; font: 13px 'Songti SC',serif; cursor: pointer; }
+.submission-help-tab:hover { background: #e3e5cf; }
+.material-download-note { display: none; }
 
 .submission-guide-requirement > span {
   display: grid;
@@ -3266,13 +3507,13 @@ onBeforeUnmount(() => {
 
 .submission-guide-requirement strong {
   font-family: 'Songti SC', 'STSong', serif;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
 }
 
 .submission-guide-requirement small {
-  color: rgba(255, 233, 188, 0.46);
-  font-size: 8px;
+  color: rgba(255, 233, 188, 0.78);
+  font-size: 10px;
 }
 
 .submission-guide-requirement i {
@@ -3304,13 +3545,106 @@ onBeforeUnmount(() => {
   letter-spacing: 0.04em;
 }
 
+.submission-guide > p.material-feedback { color: #f5e5b8; font-size: 10px; max-width: calc(100% - 92px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: auto; }
+
+.submission-return-sign {
+  --submission-return-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 114 76'%3E%3Cpath fill='black' d='M7 70 L7 64 C10 43 25 24 51 15 C63 11 74 9 84 9 L84 0 L110 16 Q114 19 110 22 L84 40 L84 29 C75 29 66 30 56 33 C33 40 18 54 10 70 Z'/%3E%3C/svg%3E");
+  position: absolute;
+  top: 38px;
+  right: clamp(20px, 2.6vw, 40px);
+  z-index: 19;
+  width: 86px;
+  height: 58px;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  cursor: pointer;
+  transition:
+    filter 180ms ease,
+    opacity 180ms ease,
+    transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.submission-return-sign::before {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background: linear-gradient(180deg, #78634b, #554433);
+  content: '';
+  opacity: 0.56;
+  pointer-events: none;
+  transform: translate(1px, 3px);
+  -webkit-mask: var(--submission-return-mask) center / contain no-repeat;
+  mask: var(--submission-return-mask) center / contain no-repeat;
+  filter: drop-shadow(0 6px 9px rgba(24, 22, 18, 0.16));
+}
+
+.submission-return-arrow {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  height: 100%;
+  background:
+    linear-gradient(135deg, rgba(245, 218, 161, 0.18), rgba(52, 42, 30, 0.12)),
+    url('@/assets/textures/hanging-sign-board-themed-arrow.jpg') center 54% / 185% auto;
+  background-blend-mode: soft-light, normal;
+  -webkit-mask: var(--submission-return-mask) center / contain no-repeat;
+  mask: var(--submission-return-mask) center / contain no-repeat;
+  filter:
+    brightness(1.12)
+    saturate(0.9)
+    drop-shadow(-1px -1px 0 rgba(245, 220, 168, 0.16))
+    drop-shadow(0 2px 1px rgba(28, 22, 16, 0.18));
+}
+
+.submission-return-sign:hover:not(:disabled) {
+  filter: brightness(1.1) saturate(0.92);
+  transform: translateX(4px);
+}
+
+.submission-return-sign:active:not(:disabled) {
+  transform: translateX(6px) scale(0.97);
+}
+
+.submission-return-sign:focus-visible .submission-return-arrow {
+  outline: 2px solid rgba(247, 228, 181, 0.74);
+  outline-offset: 3px;
+}
+
+.submission-return-sign:disabled {
+  cursor: default;
+  filter: grayscale(0.32);
+  opacity: 0.55;
+}
+
+.submission-return-sign-enter-active,
+.submission-return-sign-leave-active {
+  transition:
+    opacity 300ms ease,
+    transform 420ms cubic-bezier(0.22, 1, 0.36, 1),
+    filter 300ms ease;
+}
+
+.submission-return-sign-enter-from,
+.submission-return-sign-leave-to {
+  opacity: 0;
+  filter: blur(3px);
+  transform: translateY(-15px);
+}
+
 .submission-cache-bubble {
   position: absolute;
-  bottom: clamp(62px, 9vh, 112px);
-  left: 42%;
+  top: 50%;
+  left: 50%;
   z-index: 18;
-  width: min(410px, calc(100vw - 42px));
-  padding: 16px 17px 15px;
+  display: flex;
+  flex-direction: column;
+  width: clamp(330px, 27vw, 430px);
+  max-width: calc(100vw - 32px);
+  max-height: min(330px, 42vh);
+  padding: 15px 16px 14px;
   border: 1px solid rgba(94, 79, 49, 0.34);
   border-radius: 20px 17px 22px 16px / 18px 22px 17px 20px;
   background:
@@ -3320,18 +3654,22 @@ onBeforeUnmount(() => {
     0 18px 42px rgba(39, 44, 33, 0.24),
     inset 0 1px rgba(255, 255, 255, 0.66);
   color: #5d4a2d;
-  transform: translateX(-50%) rotate(-0.5deg);
+  transform: rotate(-0.35deg);
+  transform-origin: var(--submission-tail-x, 28%) 0;
+  will-change: left, top, transform;
 }
 
 .submission-cache-tail {
   position: absolute;
-  top: -24px;
-  right: 54px;
-  width: 52px;
-  height: 34px;
+  top: -10px;
+  left: calc(var(--submission-tail-x, 28%) - 11px);
+  width: 22px;
+  height: 22px;
+  border-top: 1px solid rgba(94, 79, 49, 0.3);
+  border-left: 1px solid rgba(94, 79, 49, 0.3);
   background: rgba(246, 237, 205, 0.96);
-  clip-path: polygon(8% 100%, 100% 100%, 0 0);
-  filter: drop-shadow(-1px -1px rgba(94, 79, 49, 0.22));
+  box-shadow: -3px -3px 8px rgba(51, 48, 35, 0.08);
+  transform: rotate(45deg);
 }
 
 .submission-cache-bubble header {
@@ -3372,8 +3710,10 @@ onBeforeUnmount(() => {
 
 .submission-cache-list {
   display: grid;
+  flex: 1 1 auto;
   gap: 6px;
-  max-height: 150px;
+  min-height: 0;
+  max-height: 148px;
   margin: 9px 0;
   overflow: auto;
   scrollbar-color: rgba(92, 110, 82, 0.4) transparent;
@@ -3444,7 +3784,10 @@ onBeforeUnmount(() => {
 }
 
 .submission-cache-empty {
-  margin: 14px 0 12px;
+  display: grid;
+  min-height: 74px;
+  margin: 6px 0 4px;
+  align-content: center;
   color: rgba(87, 70, 41, 0.62);
   font-family: 'Songti SC', 'STSong', serif;
   font-size: 13px;
@@ -3462,7 +3805,9 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding-top: 2px;
+  margin-top: auto;
+  padding-top: 5px;
+  border-top: 1px solid rgba(102, 82, 47, 0.1);
 }
 
 .submission-cache-bubble footer button {
@@ -3553,10 +3898,48 @@ onBeforeUnmount(() => {
 .submission-cache-leave-to {
   opacity: 0;
   filter: blur(4px);
-  transform: translate(-50%, 20px) rotate(-2deg) scale(0.96);
+  transform: translateY(18px) rotate(-1.5deg) scale(0.96);
+}
+
+@media (max-aspect-ratio: 4 / 3), (max-width: 900px) {
+  .submission-help-tab { top: 234px; right: 18px; z-index: 11; }
+  .sign-material-menu { grid-column: 1 / -1; }
+  .material-download-note { position: fixed; bottom: 18px; right: 18px; left: 18px; z-index: 32; display: flex; align-items: flex-start; gap: 10px; padding: 12px 16px; background: #eee5c6; color: #60724f; border: 1px solid #b4ae8d; border-radius: 4px 13px 8px 4px; box-shadow: 0 5px 20px #273b2530; font: 12px/1.7 'Songti SC',serif; }
+  .material-download-note span { flex: 1; overflow-wrap: anywhere; }
+  .material-download-note button { background: none; border: 0; color: inherit; font: 20px/1 serif; padding: 3px; cursor: pointer; }
+  .submission-guide {
+    top: 22px;
+    grid-template-columns: minmax(0, 1.2fr) minmax(140px, 0.8fr);
+    gap: 9px 18px;
+    width: min(760px, calc(100vw - 40px));
+    min-height: 142px;
+    padding: 15px 34px 17px;
+  }
+
+  .submission-guide-context {
+    border-right: 0;
+  }
+
+  .submission-guide-requirements {
+    display: grid;
+    grid-column: 1 / -1;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .submission-guide > p {
+    display: none;
+  }
+
+  .submission-return-sign {
+    top: 174px;
+    right: 18px;
+    width: 72px;
+    height: 42px;
+  }
 }
 
 @media (max-width: 720px) {
+  .submission-help-tab { top: 244px; right: 12px; }
   .submission-guide {
     top: 16px;
     grid-template-columns: 1fr 1fr;
@@ -3572,6 +3955,7 @@ onBeforeUnmount(() => {
 
   .submission-guide-requirements {
     grid-column: 1 / -1;
+    grid-template-columns: 1fr;
   }
 
   .submission-guide > p {
@@ -3579,10 +3963,17 @@ onBeforeUnmount(() => {
   }
 
   .submission-cache-bubble {
-    bottom: 24px;
-    left: 50%;
     width: calc(100vw - 28px);
+    max-height: min(320px, 40vh);
   }
+
+  .submission-return-sign {
+    top: 190px;
+    right: 12px;
+    width: 66px;
+    height: 39px;
+  }
+
 }
 
 .loading-panel,
@@ -4623,5 +5014,6 @@ onBeforeUnmount(() => {
     animation-duration: 1ms;
     transition-duration: 1ms;
   }
+
 }
 </style>

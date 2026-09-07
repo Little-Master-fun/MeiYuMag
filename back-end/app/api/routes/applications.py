@@ -1,4 +1,7 @@
 from datetime import datetime, timezone
+from datetime import date as Date
+from zoneinfo import ZoneInfo
+import unicodedata
 from pathlib import Path
 from typing import Annotated
 
@@ -12,7 +15,8 @@ from app.db.session import get_db
 from app.models.application import Application, ApplicationFile
 from app.models.auth_profile import AuthProfile
 from app.models.user import User
-from app.models.venue import ReservationCalendar
+from app.models.venue import ReservationCalendar, Venue
+from app.services.application_workflow import FILE_LABELS, signed_file_types, requested_types, validate_supplement_types
 from app.schemas.application import (
     AiPreReviewResult,
     ApplicationRead,
@@ -79,6 +83,7 @@ async def save_application_file(
         review_status="pending_admin_review",
     )
     db.add(application_file)
+    await db.flush()
     return UploadedSignedFile(
         file_type=file_type,
         version=version,
@@ -114,10 +119,20 @@ async def evaluate_pre_review(
     venue_id: int,
     file: UploadFile,
     ignored_application_id: int | None = None,
+    expected_date: str | None = None,
 ) -> tuple[AiPreReviewResult, list[ReviewIssue], list[ConflictItem], bool]:
     ai_result = await ai_review_service.pre_review_word(application_type, file)
     issues = list(ai_result.issues)
     conflicts: list[ConflictItem] = []
+    # Serialize reservation decisions for the same venue after the slow AI call.
+    venue = (await db.execute(select(Venue).where(Venue.id == venue_id).with_for_update())).scalar_one_or_none()
+    if venue is None:
+        raise HTTPException(400, "所选场地不存在")
+    normalize = lambda value: "".join(unicodedata.normalize("NFKC", value).split())
+    if not ai_result.venue_name:
+        issues.append(ReviewIssue(type="MISSING_VENUE", message="文件中未识别出场地名称，请写明所申请的场地"))
+    if ai_result.venue_name and normalize(ai_result.venue_name) != normalize(venue.name):
+        issues.append(ReviewIssue(type="VENUE_MISMATCH", message=f"文件场地“{ai_result.venue_name}”与所选“{venue.name}”不一致"))
     if not ai_result.extracted_time_slots:
         issues.append(
             ReviewIssue(
@@ -135,6 +150,14 @@ async def evaluate_pre_review(
                 )
             )
             continue
+
+        if slot.start_at.tzinfo is None or slot.end_at.tzinfo is None:
+            issues.append(ReviewIssue(type="INVALID_TIME_SLOT", message="借用时间缺少时区，请重新提交"))
+            continue
+        if slot.end_at <= slot.start_at or slot.start_at <= datetime.now(timezone.utc):
+            issues.append(ReviewIssue(type="INVALID_TIME_SLOT", message="借用时间必须在未来，且结束晚于开始"))
+        if expected_date and slot.start_at.astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat() != expected_date:
+            issues.append(ReviewIssue(type="DATE_MISMATCH", message=f"文件使用日期与所选 {expected_date} 不一致"))
 
         conditions = [
             ReservationCalendar.venue_id == venue_id,
@@ -174,9 +197,12 @@ async def application_read_with_review_reason(
         .order_by(ApplicationFile.version.desc())
     )
     latest_file = result.scalars().first()
-    review_reason = latest_file.reject_reason if latest_file is not None else None
+    review_reason = application.decision_reason or (latest_file.reject_reason if latest_file is not None else None)
+    required = (await requested_types(db, application) if application.status == "supplement_required"
+                else signed_file_types(application.application_type) if application.status == "pending_signed_files" else [])
     return ApplicationRead.model_validate(application).model_copy(
-        update={"review_reason": review_reason}
+        update={"review_reason": review_reason, "requested_file_types": required if application.status == "supplement_required" else [],
+                "required_files": [{"file_type": key, "label": FILE_LABELS.get(key, key)} for key in required]}
     )
 
 
@@ -210,6 +236,16 @@ async def get_owned_application_or_admin(
     return application
 
 
+@router.get("/{application_id}", response_model=ApplicationRead)
+async def get_application(
+    application_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ApplicationRead:
+    application = await get_owned_application_or_admin(db, application_id, current_user)
+    return await application_read_with_review_reason(db, application)
+
+
 async def mark_application_cancelled(
     db: AsyncSession,
     application: Application,
@@ -221,7 +257,10 @@ async def mark_application_cancelled(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Application cannot be cancelled in its current status",
         )
-    if application.start_at is not None and datetime.now(timezone.utc) >= application.start_at:
+    start_at = application.start_at
+    if start_at is not None and start_at.tzinfo is None:
+        start_at = start_at.replace(tzinfo=timezone.utc)
+    if start_at is not None and datetime.now(timezone.utc) >= start_at:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Application cannot be cancelled after the usage start time",
@@ -247,7 +286,7 @@ async def cancel_my_application(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ApplicationRead:
-    application = await db.get(Application, application_id)
+    application = await db.get(Application, application_id, with_for_update=True)
     if application is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
     if application.user_id != current_user.id:
@@ -262,7 +301,7 @@ async def delete_my_application(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ApplicationRead:
-    application = await db.get(Application, application_id)
+    application = await db.get(Application, application_id, with_for_update=True)
     if application is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
     if application.user_id != current_user.id:
@@ -330,7 +369,7 @@ async def upload_application_file(
     file_type: str = Form(...),
     file: UploadFile = File(...),
 ) -> GenericFileUploadResponse:
-    application = await db.get(Application, application_id)
+    application = await db.get(Application, application_id, with_for_update=True)
     if application is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
     if application.user_id != current_user.id and current_user.role != "admin":
@@ -341,7 +380,11 @@ async def upload_application_file(
             detail="Application is not waiting for supplement files",
         )
 
+    await validate_supplement_types(db, application, [file_type])
+    await file_storage_service.validate_batch([file])
     uploaded = await save_application_file(db, application_id, file_type, file)
+    application.requested_file_types = []
+    application.decision_reason = None
     application.status = "pending_admin_submit"
     await notification_service.notify_admins(
         db=db,
@@ -368,8 +411,9 @@ async def upload_application_files_batch(
     db: Annotated[AsyncSession, Depends(get_db)],
     files: list[UploadFile] = File(...),
     file_type: str = Form(default="supplement_file"),
+    file_types: list[str] | None = Form(default=None),
 ) -> GenericFilesUploadResponse:
-    application = await db.get(Application, application_id)
+    application = await db.get(Application, application_id, with_for_update=True)
     if application is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
     if application.user_id != current_user.id and current_user.role != "admin":
@@ -385,10 +429,15 @@ async def upload_application_files_batch(
             detail="At least one supplement file is required",
         )
 
-    uploaded_files = [
-        await save_application_file(db, application_id, file_type, file)
-        for file in files
-    ]
+    types = file_types if isinstance(file_types, list) else [file_type] * len(files)
+    if len(types) != len(files):
+        raise HTTPException(400, "材料类型与文件数量不一致")
+    await validate_supplement_types(db, application, types)
+    await file_storage_service.validate_batch(files)
+    uploaded_files = [await save_application_file(db, application_id, kind, file)
+                      for kind, file in zip(types, files)]
+    application.requested_file_types = []
+    application.decision_reason = None
     application.status = "pending_admin_submit"
     await notification_service.notify_admins(
         db=db,
@@ -424,17 +473,28 @@ async def submit_signed_files(
     electricity_commitment_file: UploadFile | None = File(default=None),
     electricity_commitment_signed_scan: UploadFile | None = File(default=None),
 ) -> SignedFilesSubmitResponse:
-    application = await db.get(Application, application_id)
+    application = await db.get(Application, application_id, with_for_update=True)
     if application is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
     if application.user_id != current_user.id and current_user.role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied")
-    if application.status not in {"pending_signed_files", "supplement_required"}:
+    if application.status != "pending_signed_files":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Application is not waiting for signed files",
         )
 
+    supplied = {
+        "meiyu_signed_application_form": meiyu_signed_application_form,
+        "yueyuan_plan_file": yueyuan_plan_file, "yueyuan_plan_signed_scan": yueyuan_plan_signed_scan,
+        "safety_responsibility_file": safety_responsibility_file, "safety_responsibility_signed_scan": safety_responsibility_signed_scan,
+        "work_checklist_file": work_checklist_file, "work_checklist_signed_scan": work_checklist_signed_scan,
+        "electricity_commitment_file": electricity_commitment_file, "electricity_commitment_signed_scan": electricity_commitment_signed_scan,
+    }
+    required = signed_file_types(application.application_type)
+    if not required or any(supplied[key] is None for key in required):
+        raise HTTPException(400, "请按清单上传全部签章材料")
+    await file_storage_service.validate_batch([supplied[key] for key in required])
     uploaded_files: list[UploadedSignedFile] = []
     if application.application_type == "meiyu_venue":
         if meiyu_signed_application_form is None:
@@ -507,6 +567,7 @@ async def submit_pre_review(
     venue_id: int = Form(...),
     file: UploadFile = File(...),
     additional_files: list[UploadFile] | None = File(default=None),
+    expected_date: str | None = Form(default=None),
 ) -> ApplicationPreReviewResponse:
     if not current_user.is_sdu_verified and not current_user.is_application_allowed:
         raise HTTPException(
@@ -526,11 +587,24 @@ async def submit_pre_review(
             detail="Only .docx Word documents are accepted for pre-review",
         )
 
+    await file_storage_service.validate_batch([file, *(additional_files or [])])
+    if expected_date is not None:
+        try:
+            Date.fromisoformat(expected_date)
+        except (ValueError, TypeError):
+            raise HTTPException(400, "请选择有效的申请日期")
+    venue = await db.get(Venue, venue_id)
+    if venue is None:
+        raise HTTPException(400, "所选场地不存在")
+    expected_type = "yueyuan_third_floor" if "悦园三楼" in venue.name else "meiyu_venue"
+    if application_type != expected_type:
+        raise HTTPException(400, "申请类型与场地不匹配")
     ai_result, issues, conflicts, passed = await evaluate_pre_review(
         db,
         application_type,
         venue_id,
         file,
+        expected_date=expected_date,
     )
     application_id: int | None = None
     auth_profile_result = await db.execute(
@@ -640,7 +714,7 @@ async def resubmit_pre_review(
     file: UploadFile = File(...),
     additional_files: list[UploadFile] | None = File(default=None),
 ) -> ApplicationPreReviewResponse:
-    application = await db.get(Application, application_id)
+    application = await db.get(Application, application_id, with_for_update=True)
     if application is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
     if application.user_id != current_user.id:
@@ -666,6 +740,8 @@ async def resubmit_pre_review(
             detail="Only .docx Word documents are accepted for pre-review",
         )
 
+    await file_storage_service.validate_batch([file, *(additional_files or [])])
+    application.decision_reason = None
     ai_result, issues, conflicts, passed = await evaluate_pre_review(
         db,
         application.application_type,

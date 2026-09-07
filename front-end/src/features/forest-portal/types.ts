@@ -27,6 +27,10 @@ export interface VenueUsageRangeApi {
 
 export interface PersonalApplicationApi {
   id: number
+  organization?: string | null
+  borrow_organization?: string | null
+  applicant_name?: string | null
+  applicant_department?: string | null
   application_type: string
   venue_id: number | null
   purpose_summary: string | null
@@ -34,6 +38,8 @@ export interface PersonalApplicationApi {
   start_at: string | null
   end_at: string | null
   review_reason: string | null
+  required_files: Array<{ file_type: string; label: string }>
+  requested_file_types: string[] | null
   created_at: string
 }
 
@@ -75,13 +81,17 @@ export interface ApplicationNavigationTarget {
   venueId: number
   venueName: string
   date: string
-  mode?: 'new' | 'resubmit' | 'supplement'
+  mode?: 'new' | 'resubmit' | 'supplement' | 'signed' | 'key'
   applicationId?: number
+  applicationType?: string
+  requiredFiles?: Array<{ file_type: string; label: string }>
+  reviewReason?: string | null
 }
 
 export interface StagedSubmissionFile {
   id: string
   file: File
+  fileType?: string
 }
 
 export interface ApplicationFlight {
