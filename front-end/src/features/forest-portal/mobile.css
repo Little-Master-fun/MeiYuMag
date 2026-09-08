@@ -1,0 +1,299 @@
+/* Phone layouts do not change authored desktop camera/model parameters. */
+@media (max-width: 1024px) {
+  .model-page {
+    height: var(--portal-height, 100dvh);
+  }
+  .model-viewport {
+    touch-action: none;
+  }
+  .forest-desk-tabs {
+    top: calc(10px + env(safe-area-inset-top));
+    left: 14px;
+    right: 14px;
+    gap: 6px;
+    justify-content: flex-end;
+  }
+  .forest-desk-tabs button {
+    min-height: 44px;
+    padding: 9px 12px;
+    font-size: 13px;
+  }
+  .forest-desk-tabs button:first-child {
+    margin-right: auto;
+  }
+  .login-card,
+  .login-card.register-card {
+    box-sizing: border-box;
+    top: auto;
+    right: 50%;
+    bottom: calc(12px + env(safe-area-inset-bottom));
+    width: min(440px, calc(100% - 28px));
+    max-height: calc(
+      var(--portal-height, 100dvh) - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom)
+    );
+    padding: 22px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: none;
+    transform: translateX(50%);
+  }
+  .login-card input,
+  .login-card select {
+    font-size: 16px;
+  }
+  .input-shell,
+  .password-toggle,
+  .auth-mode-switch button,
+  .captcha-button,
+  .send-code-button,
+  .login-button {
+    min-height: 44px;
+  }
+  .password-toggle {
+    min-width: 44px;
+  }
+  .login-card .auth-form-stage {
+    min-width: 0;
+  }
+  .login-card .card-heading h1 {
+    font-size: 26px;
+  }
+  .register-grid {
+    grid-template-columns: 1fr;
+  }
+  .register-grid .form-field {
+    grid-column: 1;
+  }
+  .login-card-leave-to {
+    transform: translate(50%, 20px) scale(0.97);
+  }
+
+  .submission-guide {
+    box-sizing: border-box;
+    top: calc(64px + env(safe-area-inset-top));
+    width: calc(100% - 36px);
+    min-height: 0;
+    padding: 10px 12px;
+    gap: 10px;
+    grid-template-columns: minmax(0, 1fr) 94px;
+  }
+  .submission-guide-title {
+    gap: 8px;
+  }
+  .submission-guide-title > span > small {
+    display: none;
+  }
+  .submission-guide-title strong {
+    font-size: 17px;
+    white-space: normal;
+  }
+  .submission-guide-step {
+    width: 34px;
+    height: 36px;
+    font-size: 10px;
+  }
+  .submission-guide-context {
+    padding: 0 0 0 9px;
+    font-size: 12px;
+  }
+  .submission-guide-requirements {
+    display: flex;
+    grid-column: 1/-1;
+  }
+  .submission-guide-requirement {
+    flex: 1;
+    min-height: 44px;
+    padding: 6px;
+    gap: 5px;
+    grid-template-columns: 16px minmax(0, 1fr);
+    color: #f5e7c1;
+  }
+  .submission-guide-requirement i {
+    display: none;
+  }
+  .submission-guide-requirement strong {
+    font-size: 12px;
+  }
+  .submission-guide-requirement small {
+    font-size: 10px;
+  }
+  .sign-material-menu summary {
+    min-height: 44px;
+    box-sizing: border-box;
+    padding: 5px 8px;
+  }
+  .sign-material-sheet {
+    z-index: 2;
+    width: min(320px, calc(100vw - 60px));
+    max-height: 55dvh;
+  }
+  .sign-material-sheet button {
+    min-height: 44px;
+    font-size: 14px;
+  }
+  .submission-guide > p,
+  .submission-guide > p.material-feedback {
+    display: none;
+  }
+  .submission-return-sign {
+    top: calc(12px + env(safe-area-inset-top));
+    left: 16px;
+    right: auto;
+    width: 64px;
+    height: 42px;
+  }
+  .submission-help-tab {
+    top: calc(12px + env(safe-area-inset-top));
+    right: 14px;
+    z-index: 25;
+    min-height: 44px;
+    padding: 9px 13px;
+  }
+  .submission-cache-bubble {
+    box-sizing: border-box;
+    top: auto !important;
+    left: 14px !important;
+    right: 14px;
+    bottom: calc(14px + env(safe-area-inset-bottom));
+    width: auto;
+    max-height: 43dvh;
+    padding: 16px;
+    border-radius: 18px 5px 18px 5px;
+    display: flex;
+    flex-direction: column;
+  }
+  .submission-cache-tail {
+    left: calc(50% - 16px) !important;
+    right: auto;
+  }
+  .submission-cache-bubble header {
+    flex-shrink: 0;
+    gap: 8px;
+  }
+  .submission-cache-bubble header strong {
+    font-size: 20px;
+  }
+  .submission-cache-list {
+    flex: 1;
+    min-height: 0;
+    max-height: none;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    touch-action: pan-y;
+  }
+  .submission-cache-item {
+    grid-template-columns: 20px minmax(0, 1fr) 44px;
+    gap: 8px;
+  }
+  .submission-cache-item strong {
+    font-size: 13px;
+  }
+  .submission-cache-item > button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .material-purpose {
+    font-size: 16px;
+    min-height: 44px;
+  }
+  .submission-cache-bubble footer {
+    flex-shrink: 0;
+  }
+  .submission-cache-add,
+  .submission-cache-submit {
+    min-height: 44px;
+    font-size: 14px;
+  }
+  .submission-cache-seal {
+    width: 34px;
+    height: 34px;
+  }
+  .submission-cache-empty {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    flex: 1;
+    min-height: 0;
+    margin: 8px 0;
+    padding: 0;
+    line-height: 1.5;
+    font-size: 16px;
+  }
+  .submission-cache-empty br {
+    display: none;
+  }
+  .submission-cache-empty small {
+    font-size: 12px;
+  }
+  .envelope-checklist {
+    max-height: 78px;
+    font-size: 13px;
+  }
+  .envelope-checklist summary {
+    min-height: 35px;
+    padding: 7px 0;
+    box-sizing: border-box;
+  }
+  .submission-success-notice {
+    top: calc(60px + env(safe-area-inset-top));
+    width: calc(100% - 36px);
+    box-sizing: border-box;
+    max-width: 420px;
+    z-index: 35;
+  }
+  .submission-success-notice strong {
+    font-size: 16px;
+  }
+  .submission-success-notice small {
+    overflow-wrap: anywhere;
+    font-size: 13px;
+  }
+  .material-download-note {
+    z-index: 36;
+    bottom: calc(14px + env(safe-area-inset-bottom));
+  }
+}
+@media (max-width: 1024px) and (max-height: 540px) {
+  .login-card,
+  .login-card.register-card {
+    padding: 16px 22px;
+  }
+  .card-ornament,
+  .privacy-note {
+    display: none;
+  }
+  .submission-guide {
+    top: 56px;
+    left: 50%;
+    width: calc(100% - 36px);
+    grid-template-columns: minmax(0, 1fr) 100px minmax(0, 1fr);
+    padding: 6px 12px;
+  }
+  .submission-guide-requirements,
+  .sign-material-menu {
+    grid-column: auto;
+  }
+  .submission-guide-step {
+    display: none;
+  }
+  .submission-cache-bubble {
+    left: 51% !important;
+    right: 12px;
+    max-height: calc(100dvh - 135px);
+    bottom: 12px;
+    padding: 12px;
+  }
+  .submission-cache-tail {
+    display: none;
+  }
+  .submission-cache-bubble header small {
+    display: none;
+  }
+  .submission-cache-bubble header strong {
+    font-size: 16px;
+  }
+  .submission-cache-empty {
+    margin: 8px 0;
+    padding: 0;
+  }
+}

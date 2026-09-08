@@ -798,4 +798,14 @@ footer span {
     transition: none;
   }
 }
+@media (max-width: 1024px) {
+  .desk-veil { padding: max(12px,env(safe-area-inset-top)) 12px max(12px,env(safe-area-inset-bottom)); }
+  .paper-dossier { max-height: calc(var(--portal-height,100dvh) - 32px - env(safe-area-inset-top) - env(safe-area-inset-bottom)); overscroll-behavior: contain; padding: 20px; }
+  button { min-height: 44px; touch-action: manipulation; }
+  input, select, textarea { font-size: 16px; min-height: 44px; }
+  input[type=checkbox] { min-height: auto; }
+  .dossier-header { position: sticky; top: -20px; z-index: 2; background: #f2e9cf; margin: -20px -20px 0; padding: 16px 20px; gap: 12px; }
+  .dossier-header h2 { font-size: 26px; }
+  .close-leaf { flex-shrink: 0; }
+}
 </style>

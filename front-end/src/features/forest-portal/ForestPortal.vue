@@ -92,6 +92,8 @@ import {
 } from '@/features/forest-portal/submission'
 import WorkflowDesk from './components/WorkflowDesk.vue'
 import ApplicationGuide from './components/ApplicationGuide.vue'
+import MobileFolder from './components/MobileFolder.vue'
+import { isMobileViewport, mobileEnvelopeLayout } from './mobileLayout'
 import { downloadRequirement } from './materialLibrary'
 import type { SubmissionRequirement } from './submission'
 import { useRoute, useRouter } from 'vue-router'
@@ -140,6 +142,11 @@ async function restorePortalSession() {
 }
 
 const viewport = ref<HTMLDivElement | null>(null)
+const mobileViewport = ref(isMobileViewport(window.innerWidth))
+const visibleViewportHeight = ref(window.visualViewport?.height || window.innerHeight)
+function updateVisibleViewport() {
+  visibleViewportHeight.value = window.visualViewport?.height || window.innerHeight
+}
 const venueSelector = ref<HTMLElement | null>(null)
 const applicationTab = ref<HTMLButtonElement | null>(null)
 const applicationFileInput = ref<HTMLInputElement | null>(null)
@@ -237,6 +244,7 @@ const topPageInitialScale = new THREE.Vector3(1, 1, 1)
 const {
   loadPersonalHome,
   loadVenueUsageBoard,
+  personalHomeBoard,
   resetVenueBoards,
   selectedVenueId,
   selectUsageVenue,
@@ -515,6 +523,45 @@ function getSubmissionEnvelopeTargetQuaternion() {
   ))
 }
 
+function getSubmissionEnvelopeLayout() {
+  const fallback = {
+    x: submissionEnvelopeDebug.x,
+    y: submissionEnvelopeDebug.y,
+    z: submissionEnvelopeDebug.z,
+    scale: submissionEnvelopeDebug.scale,
+  }
+  if (!mobileViewport.value || !submissionEnvelope || !camera || !viewport.value) return fallback
+  // Keep the phone's interactive envelope in front of nearby mailbox beams.
+  // Its scale is recalculated below, so bringing it nearer does not enlarge it.
+  fallback.z = -Math.max(camera.near * 4, 0.012)
+  const { object } = submissionEnvelope
+  object.updateWorldMatrix(true, true)
+  const inverse = object.matrixWorld.clone().invert()
+  const rotation = new THREE.Matrix4().makeRotationFromQuaternion(getSubmissionEnvelopeTargetQuaternion())
+  const bounds = new THREE.Box3()
+  const point = new THREE.Vector3()
+  object.traverse((child) => {
+    if (!(child instanceof THREE.Mesh)) return
+    const transform = rotation.clone().multiply(inverse).multiply(child.matrixWorld)
+    const positions = child.geometry.getAttribute('position')
+    for (let i = 0; i < positions.count; i++) {
+      bounds.expandByPoint(point.fromBufferAttribute(positions, i).applyMatrix4(transform))
+    }
+  })
+  if (bounds.isEmpty()) return fallback
+  const { clientWidth: width, clientHeight: height } = viewport.value
+  const layout = mobileEnvelopeLayout(width, height)
+  const perPixel = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * Math.abs(fallback.z) / height
+  const scale = layout.width * perPixel / Math.max(bounds.max.x - bounds.min.x, 0.000001)
+  const center = bounds.getCenter(new THREE.Vector3())
+  return {
+    x: (layout.centerX - width / 2) * perPixel - center.x * scale,
+    y: (height / 2 - layout.centerY) * perPixel - center.y * scale,
+    z: fallback.z - center.z * scale,
+    scale,
+  }
+}
+
 function applySubmissionEnvelopeDebugTransform() {
   if (
     !submissionEnvelope
@@ -522,13 +569,10 @@ function applySubmissionEnvelopeDebugTransform() {
     || submissionEnvelopeState === 'hidden'
     || submissionEnvelope.object.parent !== camera
   ) return
-  submissionEnvelope.object.position.set(
-    submissionEnvelopeDebug.x,
-    submissionEnvelopeDebug.y,
-    submissionEnvelopeDebug.z,
-  )
+  const layout = getSubmissionEnvelopeLayout()
+  submissionEnvelope.object.position.set(layout.x, layout.y, layout.z)
   submissionEnvelope.object.quaternion.copy(getSubmissionEnvelopeTargetQuaternion())
-  submissionEnvelope.object.scale.setScalar(submissionEnvelopeDebug.scale)
+  submissionEnvelope.object.scale.setScalar(layout.scale)
 }
 
 function printSubmissionEnvelopeParameters() {
@@ -563,6 +607,7 @@ function showSubmissionEnvelope() {
   }
   const { object } = submissionEnvelope
   const targetQuaternion = getSubmissionEnvelopeTargetQuaternion()
+  const layout = getSubmissionEnvelopeLayout()
   const flyDuration = THREE.MathUtils.clamp(submissionEnvelopeDebug.flyDuration, 0.15, 4)
   camera.updateMatrixWorld(true)
   object.updateMatrixWorld(true)
@@ -570,11 +615,11 @@ function showSubmissionEnvelope() {
   setSubmissionEnvelopeState('ready')
   object.visible = true
   submissionEnvelopeTween = gsap
-    .timeline()
+    .timeline({ onComplete: applySubmissionEnvelopeDebugTransform })
     .to(object.position, {
-      x: submissionEnvelopeDebug.x,
-      y: submissionEnvelopeDebug.y,
-      z: submissionEnvelopeDebug.z,
+      x: layout.x,
+      y: layout.y,
+      z: layout.z,
       duration: flyDuration,
       ease: 'power3.out',
     }, 0)
@@ -587,9 +632,9 @@ function showSubmissionEnvelope() {
       ease: 'power3.out',
     }, 0)
     .to(object.scale, {
-      x: submissionEnvelopeDebug.scale,
-      y: submissionEnvelopeDebug.scale,
-      z: submissionEnvelopeDebug.scale,
+      x: layout.scale,
+      y: layout.scale,
+      z: layout.scale,
       duration: flyDuration,
       ease: 'power3.out',
     }, 0)
@@ -683,6 +728,16 @@ function updateSubmissionBubblePosition() {
     if (lastSubmissionBubbleLayout !== 'hidden') {
       lastSubmissionBubbleLayout = 'hidden'
       submissionBubbleStyle.value = { visibility: 'hidden' }
+    }
+    return
+  }
+
+  // The phone pocket is docked below the envelope by CSS. Avoid walking every
+  // vertex each frame and avoid stale desktop inline coordinates after rotate.
+  if (mobileViewport.value) {
+    if (lastSubmissionBubbleLayout !== 'mobile') {
+      lastSubmissionBubbleLayout = 'mobile'
+      submissionBubbleStyle.value = { visibility: 'visible' }
     }
     return
   }
@@ -890,7 +945,11 @@ function startCameraEntrance(object: THREE.Object3D, framingObject: THREE.Object
   const size = bounds.getSize(new THREE.Vector3())
   const center = bounds.getCenter(new THREE.Vector3())
   const maxDimension = Math.max(size.x, size.y, size.z)
-  const modelOffsetX = viewport.value.clientWidth >= 860 ? -maxDimension * 0.18 : 0
+  // Camera and prop keyframes share the desktop scene origin. Changing that
+  // origin only at initial load made the whole clipboard drift after rotating
+  // a phone or resizing across the mobile breakpoint. Adapt the UI/envelope
+  // to the viewport, but keep this world-space reference consistent.
+  const modelOffsetX = -maxDimension * 0.18
 
   object.position.sub(center)
   object.position.x += modelOffsetX
@@ -1038,12 +1097,14 @@ function updateSubmissionSignLayout() {
   const depth = Math.abs(submissionSignDebug.z)
   const viewHeight = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * depth
   const worldPerPixel = viewHeight / viewport.value.clientHeight
-  const signWidthPx = Math.min(
+  const signWidthPx = mobileViewport.value ? viewport.value.clientWidth - 20 : Math.min(
     submissionSignDebug.maxWidthPx,
     viewport.value.clientWidth - submissionSignDebug.sideInsetPx * 2,
   )
   const signWidth = Math.max(signWidthPx, 120) * worldPerPixel
-  const signHeightScale = signWidth * submissionSignDebug.heightRatio
+  const signHeightScale = mobileViewport.value
+    ? mobileEnvelopeLayout(viewport.value.clientWidth, viewport.value.clientHeight).signHeight * worldPerPixel
+    : signWidth * submissionSignDebug.heightRatio
 
   submissionSignModel.scale.set(signWidth, signHeightScale, signWidth)
   // The downloaded sign has a tall rope section above its board. Raising the
@@ -1052,7 +1113,7 @@ function updateSubmissionSignLayout() {
   const boardTopInNormalizedModel = 0.0527
   submissionSignTargetY =
     viewHeight / 2
-    - submissionSignDebug.topInsetPx * worldPerPixel
+    - (mobileViewport.value ? 60 : submissionSignDebug.topInsetPx) * worldPerPixel
     - boardTopInNormalizedModel * signHeightScale
   submissionSignModel.position.x = 0
   submissionSignModel.position.z = submissionSignDebug.z
@@ -1183,6 +1244,7 @@ function createCameraDebugGui(distance: number, target: THREE.Vector3) {
   debugGui.domElement.style.right = 'auto'
   debugGui.domElement.style.top = '16px'
   debugGui.domElement.style.zIndex = '10'
+  debugGui.domElement.style.display = mobileViewport.value ? 'none' : ''
 
   const range = distance * 5
   const step = Math.max(distance * 0.01, 0.01)
@@ -1951,18 +2013,27 @@ function resizeRenderer() {
 
   const { clientWidth, clientHeight } = viewport.value
   if (!clientWidth || !clientHeight) return
+  mobileViewport.value = isMobileViewport(clientWidth)
+  if (debugGui) debugGui.domElement.style.display = mobileViewport.value ? 'none' : ''
+  if (controls) {
+    controls.enableRotate = !mobileViewport.value
+    controls.enablePan = !mobileViewport.value
+    controls.enableZoom = !mobileViewport.value
+  }
 
   // A DPR of 2 quadruples the fragment workload on Retina displays. The
   // stylized scene remains crisp at 1.25–1.5 while using substantially less
   // render-target memory and GPU bandwidth.
   const largeViewport = clientWidth * clientHeight > 1_500_000
-  const pixelRatioLimit = largeViewport ? 1.25 : MAX_PIXEL_RATIO
+  const pixelRatioLimit = largeViewport || mobileViewport.value ? 1.25 : MAX_PIXEL_RATIO
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, pixelRatioLimit))
   renderer.setSize(clientWidth, clientHeight, false)
   camera.aspect = clientWidth / clientHeight
   camera.updateProjectionMatrix()
   updateSubmissionSignLayout()
+  if (!submissionEnvelopeTween?.isActive()) applySubmissionEnvelopeDebugTransform()
   updateSubmissionBubblePosition()
+  scheduleVenueSelectorPositionUpdate()
 }
 
 function handleSceneVisibilityChange() {
@@ -2078,12 +2149,13 @@ async function startNewVenueApplication() {
 }
 
 function handlePaperClick(event: PointerEvent) {
-  if (desk.value) return
+  if (desk.value || applicationGuideOpen.value) return
   if (isPointerOverSubmissionEnvelope(event.clientX, event.clientY)) {
     openSubmissionFilePicker()
     return
   }
   if (!pageContentCanvas || cinematicActive.value || applicationStageActive.value) return
+  if (mobileViewport.value) return
   const pointer = getPaperPointerPosition(event.clientX, event.clientY)
   if (!pointer) return
   const action = pageContentCanvas.getPageAction(pointer.x, pointer.y)
@@ -2099,6 +2171,18 @@ function handlePaperClick(event: PointerEvent) {
   if (!target) return
 
   desk.value = { mode: 'new', initialVenueId: target.venueId, initialDate: target.date }
+}
+
+function startMobileApplication(date?: string, venueId?: number) {
+  if (!date && submissionContext.value && selectedApplicationTarget) {
+    playApplicationCamera(selectedApplicationTarget, true)
+    return
+  }
+  desk.value = { mode: 'new', initialVenueId: venueId ?? selectedVenueId.value ?? undefined, initialDate: date }
+}
+function reloadMobileFolder() {
+  if (folderPage.value === 'profile') void loadPersonalHome()
+  else void loadVenueUsageBoard()
 }
 
 function cachePaperFacePoints(paper: THREE.Mesh) {
@@ -2550,6 +2634,8 @@ onMounted(() => {
     })
 
   resizeObserver = new ResizeObserver(resizeRenderer)
+  window.visualViewport?.addEventListener('resize', updateVisibleViewport)
+  window.addEventListener('resize', updateVisibleViewport)
   resizeObserver.observe(viewport.value)
   document.addEventListener('visibilitychange', handleSceneVisibilityChange)
   resizeRenderer()
@@ -2567,6 +2653,8 @@ onBeforeUnmount(() => {
   if (submissionNoticeTimer) clearTimeout(submissionNoticeTimer)
   pageTurnTimeline?.kill()
   resizeObserver?.disconnect()
+  window.visualViewport?.removeEventListener('resize', updateVisibleViewport)
+  window.removeEventListener('resize', updateVisibleViewport)
   document.removeEventListener('visibilitychange', handleSceneVisibilityChange)
   controls?.dispose()
   debugGui?.destroy()
@@ -2640,7 +2728,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main class="model-page">
+  <main class="model-page" :class="{ 'is-mobile': mobileViewport }" :style="{ '--portal-height': `${visibleViewportHeight}px` }">
     <div ref="viewport" class="model-viewport" />
     <input
       ref="applicationFileInput"
@@ -3155,6 +3243,11 @@ onBeforeUnmount(() => {
       <button v-if="auth.isAdmin" @click="desk = { mode: 'admin' }">审核台</button>
       <button @click="logoutPortal">退出</button>
     </nav>
+    <Transition name="dossier-fade">
+      <MobileFolder v-if="mobileViewport && loginSucceeded && !cinematicActive && !applicationStageActive"
+        :page="folderPage" :profile-board="personalHomeBoard" :calendar-board="venueUsageBoard" :selected-venue-id="selectedVenueId"
+        @page="switchFolderPage" @venue="selectUsageVenue" @detail="desk = { mode: 'personal', applicationId: $event }" @apply="startMobileApplication" @reload="reloadMobileFolder" />
+    </Transition>
     <button v-if="applicationStageActive && !cinematicActive" class="submission-help-tab" @pointerdown.stop @click.stop="applicationGuideOpen = true">使用指南 · 示例</button>
     <Transition name="dossier-fade">
       <ApplicationGuide v-if="applicationGuideOpen" @close="applicationGuideOpen = false" />
@@ -3164,7 +3257,7 @@ onBeforeUnmount(() => {
     </Transition>
     <Transition name="application-tab">
       <button
-        v-if="loginSucceeded && folderPage === 'profile' && !cinematicActive && !applicationStageActive"
+        v-if="!mobileViewport && loginSucceeded && folderPage === 'profile' && !cinematicActive && !applicationStageActive"
         ref="applicationTab"
         class="application-edge-tab"
         type="button"
@@ -3186,7 +3279,7 @@ onBeforeUnmount(() => {
 
     <Transition name="venue-selector">
       <nav
-        v-if="folderPage === 'calendar' && venueSelectorReady && !cinematicActive && !applicationStageActive"
+        v-if="!mobileViewport && folderPage === 'calendar' && venueSelectorReady && !cinematicActive && !applicationStageActive"
         ref="venueSelector"
         class="venue-floating-selector"
         aria-label="选择要查看的场地"
@@ -5017,3 +5110,4 @@ onBeforeUnmount(() => {
 
 }
 </style>
+<style scoped src="./mobile.css"></style>

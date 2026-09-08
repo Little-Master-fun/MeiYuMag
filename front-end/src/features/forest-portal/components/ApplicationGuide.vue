@@ -658,4 +658,10 @@ p {
     transition: none !important;
   }
 }
+@media (max-width: 1024px) {
+  .guide-paper { max-height: calc(var(--portal-height,100dvh) - 32px - env(safe-area-inset-top) - env(safe-area-inset-bottom)); }
+  button { min-height: 44px; touch-action: manipulation; }
+  .guide-close { min-width: 44px; }
+  .guide-tabs button { min-height: 44px; }
+}
 </style>
