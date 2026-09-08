@@ -4,6 +4,7 @@ import {
   calendarDays,
   isMobileViewport,
   mobileEnvelopeLayout,
+  mobilePaperFraming,
 } from '../src/features/forest-portal/mobileLayout.ts'
 
 test('mobile layout includes landscape phones and preserves desktop above 1024px', () => {
@@ -11,6 +12,25 @@ test('mobile layout includes landscape phones and preserves desktop above 1024px
   assert(isMobileViewport(932))
   assert(isMobileViewport(1024))
   assert(!isMobileViewport(1025))
+})
+test('paper framing keeps the sheet centered with room for both bookmark rails', () => {
+  const bounds = { minX: 0.4, maxX: 2, minY: -1.2, maxY: 1.4 }
+  for (const [width, height] of [
+    [320, 568],
+    [390, 844],
+    [932, 430],
+  ]) {
+    const frame = mobilePaperFraming(width!, height!, bounds)
+    const left = ((bounds.minX * frame.scale - frame.offsetX + 1) * width!) / 2
+    const right = ((bounds.maxX * frame.scale - frame.offsetX + 1) * width!) / 2
+    assert(left >= Math.min(76, width! * 0.19) - 0.001)
+    assert(right <= width! - Math.min(76, width! * 0.19) + 0.001)
+    assert(Math.abs((left + right) / 2 - width! / 2) < 0.001)
+    assert(frame.paperHeight <= height! - 120 + 0.001)
+    const zoomed = mobilePaperFraming(width!, height!, bounds, 2, { x: 12, y: 20 })
+    assert.equal(zoomed.scale, frame.scale * 2)
+    assert(Math.abs(zoomed.offsetX - (frame.offsetX * 2 - 24 / width!)) < 0.001)
+  }
 })
 test('calendar spans month boundaries and includes both endpoints', () => {
   const days = calendarDays('2026-08-23', '2026-09-22', [])

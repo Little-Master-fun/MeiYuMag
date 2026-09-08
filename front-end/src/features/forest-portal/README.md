@@ -16,19 +16,24 @@ This directory owns the login-to-application 3D experience. The route view in
 - `mobileLayout.ts`: shared mobile breakpoint and viewport-based 3D envelope
   placement; pure calendar day/occupancy helpers covered by unit tests.
 - `mobile.css`: scoped phone/tablet, safe-area and short-landscape layouts.
-- `components/MobileFolder.vue`: touch-scrollable parchment home and calendar,
-  sharing `useVenueBoards` data and the existing application/upload workflow.
+- `components/MobileFolder.vue`: retained first-version DOM layout reference;
+  no longer mounted by the portal (the user prefers the desktop 3D paper).
 
 When adding a new portal capability, keep network/business state in a composable
 or service and leave `ForestPortal.vue` responsible for orchestration only.
 
 ## Mobile behavior and regression checks
 
-At widths up to 1024 CSS pixels, use the readable DOM parchment with native
-vertical scrolling and horizontally scrollable venue bookmarks. Do not shrink
-the desktop canvas text into a phone-sized sheet. The 3D forest, camera sequence,
-mailbox and real envelope remain active. Drag/pinch scene controls and the debug
-panel are disabled on small screens so gestures do not fight page scrolling.
+At widths up to 1024 CSS pixels, frame the same 3D paper to fit the viewport,
+keeping venue bookmarks on its sides and the application tab at its lower right.
+One-finger dragging scrolls paper content; two fingers zoom/pan the paper framing
+for reading, with a reset control. These gestures do not rotate the scene.
+The login/register card is vertically centered and scrolls when the keyboard
+reduces the visible viewport.
+
+The upload pocket is anchored to the actual projected envelope vertices, not
+the screen bottom. In short landscape screens it sits alongside the envelope,
+with the bubble tail on the left pointing toward the envelope's center.
 
 Keep the scene origin identical across viewport sizes: authored camera/prop
 keyframes depend on it. Recompute only envelope placement, sign size and overlay

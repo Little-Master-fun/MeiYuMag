@@ -24,9 +24,9 @@
   .login-card,
   .login-card.register-card {
     box-sizing: border-box;
-    top: auto;
+    top: 50%;
     right: 50%;
-    bottom: calc(12px + env(safe-area-inset-bottom));
+    bottom: auto;
     width: min(440px, calc(100% - 28px));
     max-height: calc(
       var(--portal-height, 100dvh) - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom)
@@ -35,7 +35,7 @@
     overflow-y: auto;
     overscroll-behavior: contain;
     scrollbar-width: none;
-    transform: translateX(50%);
+    transform: translate(50%, -50%);
   }
   .login-card input,
   .login-card select {
@@ -65,7 +65,7 @@
     grid-column: 1;
   }
   .login-card-leave-to {
-    transform: translate(50%, 20px) scale(0.97);
+    transform: translate(50%, calc(-50% + 20px)) scale(0.97);
   }
 
   .submission-guide {
@@ -151,19 +151,18 @@
   }
   .submission-cache-bubble {
     box-sizing: border-box;
-    top: auto !important;
-    left: 14px !important;
-    right: 14px;
-    bottom: calc(14px + env(safe-area-inset-bottom));
-    width: auto;
+    right: auto;
+    bottom: auto;
+    width: min(370px, calc(100% - 28px));
     max-height: 43dvh;
     padding: 16px;
     border-radius: 18px 5px 18px 5px;
     display: flex;
     flex-direction: column;
+    transform: none;
   }
   .submission-cache-tail {
-    left: calc(50% - 16px) !important;
+    left: calc(var(--submission-tail-x, 50%) - 11px);
     right: auto;
   }
   .submission-cache-bubble header {
@@ -252,6 +251,80 @@
     z-index: 36;
     bottom: calc(14px + env(safe-area-inset-bottom));
   }
+  .venue-floating-selector {
+    display: block;
+    inset: 0;
+    padding: 0;
+    overflow: visible;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    backdrop-filter: none;
+  }
+  .venue-float-button,
+  .venue-float-button:nth-child(n) {
+    position: absolute;
+    min-width: 0;
+    width: min(70px, 18vw);
+    max-width: none;
+    min-height: 34px;
+    padding: 5px 6px;
+    gap: 3px;
+    font-size: 10px;
+    white-space: normal;
+    transform: translate(var(--venue-shift-x), -50%) rotate(var(--venue-rotation));
+    backdrop-filter: none;
+    touch-action: manipulation;
+  }
+  .venue-button-mark {
+    width: 4px;
+    height: 4px;
+  }
+  .application-edge-tab {
+    display: flex;
+    min-width: 0;
+    width: min(74px, 19vw);
+    min-height: 36px;
+    padding: 6px 17px 6px 5px;
+    font-size: 11px;
+    letter-spacing: 0;
+    touch-action: manipulation;
+  }
+  .application-tab-sprig {
+    display: none;
+  }
+  .application-tab-seal {
+    width: 16px;
+    height: 19px;
+    right: 2px;
+  }
+  .application-tab-seal i {
+    transform: scale(0.5);
+    top: 7px;
+    left: 2px;
+  }
+  .paper-touch-hint {
+    position: absolute;
+    bottom: calc(46px + env(safe-area-inset-bottom));
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 8px 12px;
+    white-space: nowrap;
+    color: #59694f;
+    background: #f2ebd4e6;
+    border: 1px solid #aab29b;
+    border-radius: 3px 12px 4px 9px;
+    font:
+      11px 'Songti SC',
+      serif;
+    z-index: 6;
+  }
+  .paper-touch-hint button {
+    color: inherit;
+    background: none;
+    border: 0;
+    padding: 6px;
+  }
 }
 @media (max-width: 1024px) and (max-height: 540px) {
   .login-card,
@@ -277,14 +350,17 @@
     display: none;
   }
   .submission-cache-bubble {
-    left: 51% !important;
-    right: 12px;
+    width: 46%;
+    right: auto;
     max-height: calc(100dvh - 135px);
-    bottom: 12px;
+    bottom: auto;
     padding: 12px;
   }
   .submission-cache-tail {
-    display: none;
+    display: block;
+    left: -11px;
+    top: calc(var(--submission-tail-y, 50%) - 11px);
+    transform: rotate(-45deg);
   }
   .submission-cache-bubble header small {
     display: none;

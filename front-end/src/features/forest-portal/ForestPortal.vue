@@ -92,8 +92,7 @@ import {
 } from '@/features/forest-portal/submission'
 import WorkflowDesk from './components/WorkflowDesk.vue'
 import ApplicationGuide from './components/ApplicationGuide.vue'
-import MobileFolder from './components/MobileFolder.vue'
-import { isMobileViewport, mobileEnvelopeLayout } from './mobileLayout'
+import { isMobileViewport, mobileEnvelopeLayout, mobilePaperFraming } from './mobileLayout'
 import { downloadRequirement } from './materialLibrary'
 import type { SubmissionRequirement } from './submission'
 import { useRoute, useRouter } from 'vue-router'
@@ -244,7 +243,6 @@ const topPageInitialScale = new THREE.Vector3(1, 1, 1)
 const {
   loadPersonalHome,
   loadVenueUsageBoard,
-  personalHomeBoard,
   resetVenueBoards,
   selectedVenueId,
   selectUsageVenue,
@@ -713,6 +711,7 @@ function isPointerOverSubmissionEnvelope(clientX: number, clientY: number) {
   return pageRaycaster.intersectObject(submissionEnvelope.object, true).length > 0
 }
 
+let lastBubbleProjectionSignature = ''
 function updateSubmissionBubblePosition() {
   const bubble = submissionCacheBubble.value
   const envelope = submissionEnvelope?.object
@@ -732,24 +731,24 @@ function updateSubmissionBubblePosition() {
     return
   }
 
-  // The phone pocket is docked below the envelope by CSS. Avoid walking every
-  // vertex each frame and avoid stale desktop inline coordinates after rotate.
-  if (mobileViewport.value) {
-    if (lastSubmissionBubbleLayout !== 'mobile') {
-      lastSubmissionBubbleLayout = 'mobile'
-      submissionBubbleStyle.value = { visibility: 'visible' }
-    }
-    return
-  }
-
   envelope.updateWorldMatrix(true, true)
   camera.updateMatrixWorld(true)
   const rendererBounds = renderer.domElement.getBoundingClientRect()
   const pageBounds = viewport.value.parentElement?.getBoundingClientRect() ?? rendererBounds
+  // Reproject during animation/resize/content changes, not on every idle frame.
+  const projectionSignature = [
+    ...envelope.matrixWorld.elements, ...camera.matrixWorldInverse.elements,
+    ...camera.projectionMatrix.elements, rendererBounds.width, rendererBounds.height,
+    rendererBounds.left - pageBounds.left, rendererBounds.top - pageBounds.top,
+    bubble.offsetWidth, bubble.offsetHeight,
+  ].join(':')
+  if (projectionSignature === lastBubbleProjectionSignature && lastSubmissionBubbleLayout !== 'hidden') return
+  lastBubbleProjectionSignature = projectionSignature
   const projectedVertex = new THREE.Vector3()
   let envelopeMinX = Number.POSITIVE_INFINITY
   let envelopeMaxX = Number.NEGATIVE_INFINITY
   let envelopeMaxY = Number.NEGATIVE_INFINITY
+  let envelopeMinY = Number.POSITIVE_INFINITY
   envelope.traverse((child) => {
     if (!(child instanceof THREE.Mesh)) return
     const positions = child.geometry.getAttribute('position')
@@ -766,6 +765,7 @@ function updateSubmissionBubblePosition() {
       envelopeMinX = Math.min(envelopeMinX, screenX)
       envelopeMaxX = Math.max(envelopeMaxX, screenX)
       envelopeMaxY = Math.max(envelopeMaxY, screenY)
+      envelopeMinY = Math.min(envelopeMinY, screenY)
     }
   })
   if (!Number.isFinite(envelopeMinX) || !Number.isFinite(envelopeMaxX)) return
@@ -780,14 +780,15 @@ function updateSubmissionBubblePosition() {
   // Center the note under the visible envelope so it reads as that envelope's
   // contents. Projecting the actual vertices avoids the empty corners of a
   // rotated 3D bounding box shifting the apparent center under perspective.
-  const preferredLeft = envelopeCenterX - bubbleWidth * 0.5
+  const sidePocket = mobileViewport.value && pageBounds.height < 540
+  const preferredLeft = sidePocket ? envelopeMaxX + 18 : envelopeCenterX - bubbleWidth * 0.5
   const left = THREE.MathUtils.clamp(
     preferredLeft,
     edgeInset,
     Math.max(edgeInset, pageBounds.width - bubbleWidth - edgeInset),
   )
   const top = THREE.MathUtils.clamp(
-    envelopeMaxY + 12,
+    sidePocket ? (envelopeMinY + envelopeMaxY - bubbleHeight) * 0.5 : envelopeMaxY + 12,
     132,
     Math.max(132, pageBounds.height - bubbleHeight - edgeInset),
   )
@@ -796,8 +797,9 @@ function updateSubmissionBubblePosition() {
     38,
     Math.max(38, bubbleWidth - 38),
   )
+  const tailY = THREE.MathUtils.clamp((envelopeMinY + envelopeMaxY) / 2 - top, 24, bubbleHeight - 24)
 
-  const layoutKey = `${Math.round(left)}:${Math.round(top)}:${Math.round(tailCenter)}`
+  const layoutKey = `${Math.round(left)}:${Math.round(top)}:${Math.round(tailCenter)}:${Math.round(tailY)}`
   if (layoutKey === lastSubmissionBubbleLayout) return
   lastSubmissionBubbleLayout = layoutKey
 
@@ -806,6 +808,7 @@ function updateSubmissionBubblePosition() {
     left: `${Math.round(left)}px`,
     top: `${Math.round(top)}px`,
     '--submission-tail-x': `${Math.round(tailCenter)}px`,
+    '--submission-tail-y': `${Math.round(tailY)}px`,
   } as CSSProperties
 }
 
@@ -2115,6 +2118,25 @@ function handlePaperWheel(event: WheelEvent) {
 }
 
 function handlePaperPointerMove(event: PointerEvent) {
+  if (paperPointers.has(event.pointerId)) {
+    paperPointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
+    if (paperPinch && paperPointers.size === 2) {
+      const [a, b] = [...paperPointers.values()] as [{x:number;y:number}, {x:number;y:number}]
+      paperZoom.value = THREE.MathUtils.clamp(paperPinch.zoom * Math.hypot(a.x - b.x, a.y - b.y) / paperPinch.distance, 1, 2.4)
+      const maxPan = (paperZoom.value - 1) * Math.min(viewport.value?.clientWidth ?? 390, paperScreenHeight) / 2
+      paperPan.x = THREE.MathUtils.clamp(paperPinch.panX + (a.x + b.x) / 2 - paperPinch.x, -maxPan, maxPan)
+      paperPan.y = THREE.MathUtils.clamp(paperPinch.panY + (a.y + b.y) / 2 - paperPinch.y, -maxPan, maxPan)
+      suppressPaperClickUntil = performance.now() + 400
+      return
+    }
+  }
+  if (paperTouch?.id === event.pointerId) {
+    const delta = event.clientY - paperTouch.y
+    if (Math.abs(event.clientY - paperTouch.startY) > 5) paperTouch.moved = true
+    if (paperTouch.moved) pageContentCanvas?.scrollBy(-delta * 1400 / Math.max(paperScreenHeight, 1))
+    paperTouch.y = event.clientY
+    return
+  }
   if (!renderer || !pageContentCanvas) return
   if (isPointerOverSubmissionEnvelope(event.clientX, event.clientY)) {
     pageContentCanvas.pointerLeave()
@@ -2149,13 +2171,13 @@ async function startNewVenueApplication() {
 }
 
 function handlePaperClick(event: PointerEvent) {
+  if (performance.now() < suppressPaperClickUntil) return
   if (desk.value || applicationGuideOpen.value) return
   if (isPointerOverSubmissionEnvelope(event.clientX, event.clientY)) {
     openSubmissionFilePicker()
     return
   }
   if (!pageContentCanvas || cinematicActive.value || applicationStageActive.value) return
-  if (mobileViewport.value) return
   const pointer = getPaperPointerPosition(event.clientX, event.clientY)
   if (!pointer) return
   const action = pageContentCanvas.getPageAction(pointer.x, pointer.y)
@@ -2173,16 +2195,69 @@ function handlePaperClick(event: PointerEvent) {
   desk.value = { mode: 'new', initialVenueId: target.venueId, initialDate: target.date }
 }
 
-function startMobileApplication(date?: string, venueId?: number) {
-  if (!date && submissionContext.value && selectedApplicationTarget) {
-    playApplicationCamera(selectedApplicationTarget, true)
+let paperTouch: { id: number; y: number; startY: number; moved: boolean } | null = null
+let suppressPaperClickUntil = 0
+let paperScreenHeight = 500
+const paperZoom = ref(1)
+const paperPan = { x: 0, y: 0 }
+const paperPointers = new Map<number, { x: number; y: number }>()
+let paperPinch: { distance: number; zoom: number; x: number; y: number; panX: number; panY: number } | null = null
+function resetPaperZoom() {
+  paperZoom.value = 1
+  paperPan.x = paperPan.y = 0
+}
+function beginPaperTouch(event: PointerEvent) {
+  if (event.pointerType === 'mouse' || !mobileViewport.value || cinematicActive.value || applicationStageActive.value) return
+  if (!paperPointers.size && !isPointerOverPaper(event.clientX, event.clientY)) return
+  paperPointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
+  if (paperPointers.size === 2) {
+    const [a, b] = [...paperPointers.values()] as [{x:number;y:number}, {x:number;y:number}]
+    paperPinch = { distance: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)), zoom: paperZoom.value, x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, panX: paperPan.x, panY: paperPan.y }
+    paperTouch = null
+    renderer?.domElement.setPointerCapture(event.pointerId)
     return
   }
-  desk.value = { mode: 'new', initialVenueId: venueId ?? selectedVenueId.value ?? undefined, initialDate: date }
+  paperTouch = { id: event.pointerId, y: event.clientY, startY: event.clientY, moved: false }
+  renderer?.domElement.setPointerCapture(event.pointerId)
 }
-function reloadMobileFolder() {
-  if (folderPage.value === 'profile') void loadPersonalHome()
-  else void loadVenueUsageBoard()
+function endPaperTouch(event: PointerEvent) {
+  paperPointers.delete(event.pointerId)
+  if (paperPinch) {
+    paperPinch = null
+    suppressPaperClickUntil = performance.now() + 400
+  }
+  if (paperTouch?.id !== event.pointerId) return
+  if (paperTouch.moved) suppressPaperClickUntil = performance.now() + 400
+  paperTouch = null
+}
+
+// Change framing, not the authored world-space camera or prop keyframes.
+// The exact same paper texture and paper-edge DOM tabs are used on all devices.
+let mobileProjectionApplied = false
+function frameMobilePaper() {
+  if (!camera) return
+  if (!mobileViewport.value && !mobileProjectionApplied) return
+  camera.updateProjectionMatrix()
+  mobileProjectionApplied = false
+  if (!mobileViewport.value || !loginSucceeded.value || applicationStageActive.value || cinematicActive.value || !paperSurfaceMesh || !viewport.value) return
+  paperSurfaceMesh.updateWorldMatrix(true, false)
+  camera.updateMatrixWorld(true)
+  const bounds = new THREE.Box3()
+  const point = new THREE.Vector3()
+  for (const corner of paperVisibleFacePoints) bounds.expandByPoint(point.copy(corner).applyMatrix4(paperSurfaceMesh.matrixWorld).project(camera))
+  if (bounds.isEmpty()) return
+  const { clientWidth: width, clientHeight: height } = viewport.value
+  const frame = mobilePaperFraming(width, height, {
+    minX: bounds.min.x, maxX: bounds.max.x, minY: bounds.min.y, maxY: bounds.max.y,
+  }, paperZoom.value, paperPan)
+  const matrix = camera.projectionMatrix.elements
+  matrix[0] *= frame.scale
+  matrix[5] *= frame.scale
+  matrix[8] = frame.offsetX
+  matrix[9] = frame.offsetY
+  camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert()
+  mobileProjectionApplied = true
+  paperScreenHeight = frame.paperHeight
 }
 
 function cachePaperFacePoints(paper: THREE.Mesh) {
@@ -2256,7 +2331,7 @@ function updateVenueSelectorPosition() {
 
   const selectorBounds = positioningLayer.getBoundingClientRect()
   const rendererBounds = renderer.domElement.getBoundingClientRect()
-  if (!selectorBounds.width || !rendererBounds.width || rendererBounds.width < 860) return
+  if (!selectorBounds.width || !rendererBounds.width) return
 
   paperSurfaceMesh.geometry.computeBoundingBox()
   const paperBounds = paperSurfaceMesh.geometry.boundingBox
@@ -2430,6 +2505,7 @@ function animate(now = performance.now()) {
   const cameraIsMoving =
     updateCameraEntrance(now) || updatePostLoginCamera(now) || updateApplicationCamera(now)
   if (!cameraIsMoving && controls?.enabled) controls.update()
+  frameMobilePaper()
   if (applicationStageActive.value) updateSubmissionBubblePosition()
 
   // Static scene shadows are cached. Refresh them only while the clipboard is
@@ -2481,6 +2557,9 @@ onMounted(() => {
     passive: false,
   })
   renderer.domElement.addEventListener('pointermove', handlePaperPointerMove, { passive: true })
+  renderer.domElement.addEventListener('pointerdown', beginPaperTouch)
+  renderer.domElement.addEventListener('pointerup', endPaperTouch)
+  renderer.domElement.addEventListener('pointercancel', endPaperTouch)
   renderer.domElement.addEventListener('pointerleave', handlePaperPointerLeave)
   renderer.domElement.addEventListener('click', handlePaperClick)
   renderer.domElement.addEventListener('dragover', handleSubmissionDragOver)
@@ -2660,6 +2739,9 @@ onBeforeUnmount(() => {
   debugGui?.destroy()
   renderer?.domElement.removeEventListener('wheel', handlePaperWheel, true)
   renderer?.domElement.removeEventListener('pointermove', handlePaperPointerMove)
+  renderer?.domElement.removeEventListener('pointerdown', beginPaperTouch)
+  renderer?.domElement.removeEventListener('pointerup', endPaperTouch)
+  renderer?.domElement.removeEventListener('pointercancel', endPaperTouch)
   renderer?.domElement.removeEventListener('pointerleave', handlePaperPointerLeave)
   renderer?.domElement.removeEventListener('click', handlePaperClick)
   renderer?.domElement.removeEventListener('dragover', handleSubmissionDragOver)
@@ -3243,12 +3325,11 @@ onBeforeUnmount(() => {
       <button v-if="auth.isAdmin" @click="desk = { mode: 'admin' }">审核台</button>
       <button @click="logoutPortal">退出</button>
     </nav>
-    <Transition name="dossier-fade">
-      <MobileFolder v-if="mobileViewport && loginSucceeded && !cinematicActive && !applicationStageActive"
-        :page="folderPage" :profile-board="personalHomeBoard" :calendar-board="venueUsageBoard" :selected-venue-id="selectedVenueId"
-        @page="switchFolderPage" @venue="selectUsageVenue" @detail="desk = { mode: 'personal', applicationId: $event }" @apply="startMobileApplication" @reload="reloadMobileFolder" />
-    </Transition>
     <button v-if="applicationStageActive && !cinematicActive" class="submission-help-tab" @pointerdown.stop @click.stop="applicationGuideOpen = true">使用指南 · 示例</button>
+    <aside v-if="mobileViewport && loginSucceeded && !cinematicActive && !applicationStageActive" class="paper-touch-hint">
+      <button v-if="paperZoom > 1.01" @click="resetPaperZoom">还原纸页 ↙</button>
+      <span v-else>双指缩放纸页 · 单指滑动内容</span>
+    </aside>
     <Transition name="dossier-fade">
       <ApplicationGuide v-if="applicationGuideOpen" @close="applicationGuideOpen = false" />
     </Transition>
@@ -3257,7 +3338,7 @@ onBeforeUnmount(() => {
     </Transition>
     <Transition name="application-tab">
       <button
-        v-if="!mobileViewport && loginSucceeded && folderPage === 'profile' && !cinematicActive && !applicationStageActive"
+        v-if="loginSucceeded && folderPage === 'profile' && !cinematicActive && !applicationStageActive"
         ref="applicationTab"
         class="application-edge-tab"
         type="button"
@@ -3279,7 +3360,7 @@ onBeforeUnmount(() => {
 
     <Transition name="venue-selector">
       <nav
-        v-if="!mobileViewport && folderPage === 'calendar' && venueSelectorReady && !cinematicActive && !applicationStageActive"
+        v-if="folderPage === 'calendar' && venueSelectorReady && !cinematicActive && !applicationStageActive"
         ref="venueSelector"
         class="venue-floating-selector"
         aria-label="选择要查看的场地"
