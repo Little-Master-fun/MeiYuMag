@@ -7,10 +7,14 @@ import vueDevTools from 'vite-plugin-vue-devtools'
 import tailwindcss from '@tailwindcss/vite'
 
 // https://vite.dev/config/
-export default defineConfig({
+export default defineConfig(({ command }) => ({
+  clearScreen: false,
+  define: {
+    'import.meta.env.VITE_ANDROID_ALLOW_HTTP': JSON.stringify(process.env.TAURI_ENV_DEBUG === 'true' ? 'true' : 'false'),
+  },
   plugins: [
     vue(),
-    vueDevTools(),
+    ...(command === 'serve' && !process.env.TAURI_ENV_PLATFORM ? [vueDevTools()] : []),
     tailwindcss(),
   ],
   resolve: {
@@ -19,6 +23,11 @@ export default defineConfig({
     },
   },
   server: {
+    port: 5173,
+    strictPort: true,
+    host: process.env.TAURI_DEV_HOST || '127.0.0.1',
+    hmr: process.env.TAURI_DEV_HOST ? { host: process.env.TAURI_DEV_HOST, port: 1421, protocol: 'ws' } : undefined,
+    watch: { ignored: ['**/src-tauri/**'] },
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:8000',
@@ -26,4 +35,4 @@ export default defineConfig({
       },
     },
   },
-})
+}))

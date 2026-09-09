@@ -2018,11 +2018,6 @@ function resizeRenderer() {
   if (!clientWidth || !clientHeight) return
   mobileViewport.value = isMobileViewport(clientWidth)
   if (debugGui) debugGui.domElement.style.display = mobileViewport.value ? 'none' : ''
-  if (controls) {
-    controls.enableRotate = !mobileViewport.value
-    controls.enablePan = !mobileViewport.value
-    controls.enableZoom = !mobileViewport.value
-  }
 
   // A DPR of 2 quadruples the fragment workload on Retina displays. The
   // stylized scene remains crisp at 1.25–1.5 while using substantially less
@@ -2549,9 +2544,11 @@ onMounted(() => {
   controls.dampingFactor = 0.06
   controls.enabled = false
   controls.autoRotate = false
-  controls.enableRotate = true
-  controls.enablePan = true
-  controls.enableZoom = true
+  // Keep controls for scripted camera targets, but never let pointer gestures
+  // move the scene, even when a flight finishes and re-enables controls.
+  controls.enableRotate = false
+  controls.enablePan = false
+  controls.enableZoom = false
   renderer.domElement.addEventListener('wheel', handlePaperWheel, {
     capture: true,
     passive: false,

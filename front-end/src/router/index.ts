@@ -1,8 +1,9 @@
-import { createRouter, createWebHistory } from 'vue-router'
+import { createRouter, createWebHistory, createWebHashHistory } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { nativeApp } from '@/platform/native'
 
 const router = createRouter({
-  history: createWebHistory(import.meta.env.BASE_URL),
+  history: nativeApp ? createWebHashHistory() : createWebHistory(import.meta.env.BASE_URL),
   routes: [
     { path: '/', redirect: '/login' },
     {

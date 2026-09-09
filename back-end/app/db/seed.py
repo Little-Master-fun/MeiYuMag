@@ -60,8 +60,6 @@ VENUE_SEEDS = [
     },
 ]
 
-DEFAULT_INITIAL_ADMIN_ACCOUNT = "202300450146"
-DEFAULT_INITIAL_ADMIN_PASSWORD = "genius"
 
 DEMO_USAGE_SEEDS = [
     {
@@ -345,8 +343,9 @@ async def upsert_venues() -> None:
                 venue.description = item["description"]
             venues_by_name[item["name"]] = venue
 
-        initial_admin_account = settings.initial_admin_account or DEFAULT_INITIAL_ADMIN_ACCOUNT
-        initial_admin_password = settings.initial_admin_password or DEFAULT_INITIAL_ADMIN_PASSWORD
+        settings.validate_production()
+        initial_admin_account = settings.initial_admin_account
+        initial_admin_password = settings.initial_admin_password
         if initial_admin_account and initial_admin_password:
             email = initial_admin_account.lower()
             result = await db.execute(select(User).where(User.email == email))
@@ -365,7 +364,8 @@ async def upsert_venues() -> None:
                 user.is_application_allowed = True
 
             await db.flush()
-            await upsert_demo_usage(db, user, venues_by_name)
+            if settings.app_env != "production":
+                await upsert_demo_usage(db, user, venues_by_name)
 
         await db.commit()
 

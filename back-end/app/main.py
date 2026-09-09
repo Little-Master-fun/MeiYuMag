@@ -6,7 +6,11 @@ from app.core.config import settings
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title=settings.app_name)
+    settings.validate_production()
+    production = settings.app_env == "production"
+    app = FastAPI(title=settings.app_name, docs_url=None if production else "/docs",
+                  redoc_url=None if production else "/redoc",
+                  openapi_url=None if production else "/openapi.json")
 
     app.add_middleware(
         CORSMiddleware,

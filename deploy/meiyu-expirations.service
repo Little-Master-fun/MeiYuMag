@@ -1,0 +1,10 @@
+[Unit]
+Description=Meiyu reservation expiry processing
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/meiyu/current
+ExecStart=/usr/bin/docker compose -f deploy/compose.yml run --rm --no-deps api python -m app.tasks.process_expirations
+TimeoutStartSec=300

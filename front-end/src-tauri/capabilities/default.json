@@ -1,0 +1,25 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "enables the default permissions",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "dialog:allow-save",
+    "fs:allow-write-file",
+    {
+      "identifier": "http:default",
+      "allow": [
+        { "url": "https://*:*/*" },
+        { "url": "http://localhost:*/*" },
+        { "url": "http://(127\\..*):*/*" },
+        { "url": "http://(10\\..*):*/*" },
+        { "url": "http://(192\\.168\\..*):*/*" },
+        { "url": "http://(172\\.(?:1[6-9]|2[0-9]|3[01])\\..*):*/*" },
+        { "url": "http://[\\:\\:1]:*/*" }
+      ]
+    }
+  ]
+}

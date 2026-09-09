@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { saveDownloadedBlob } from '../../platform/native.ts'
 import type { ApplicationNavigationTarget, PersonalApplicationApi } from './types'
 
 export const applicationStatusLabels: Record<string, string> = {
@@ -72,10 +73,5 @@ export function targetForApplication(
 }
 export async function downloadMaterial(url: string, filename: string) {
   const { data } = await axios.get(url, { responseType: 'blob' })
-  const href = URL.createObjectURL(data)
-  const link = document.createElement('a')
-  link.href = href
-  link.download = filename
-  link.click()
-  setTimeout(() => URL.revokeObjectURL(href), 1000)
+  await saveDownloadedBlob(data, filename)
 }

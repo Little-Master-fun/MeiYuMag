@@ -123,7 +123,7 @@ The backend stores this value in `User.department`, which is used as the user's 
 }
 ```
 
-SDU ID login becomes available only after the user completes SDU authentication and the ID is saved in `AuthProfile`. The seed script creates the initial local admin account `202300450146`.
+SDU ID login becomes available only after the user completes SDU authentication and the ID is saved in `AuthProfile`. Set `INITIAL_ADMIN_ACCOUNT` and `INITIAL_ADMIN_PASSWORD` explicitly to bootstrap an administrator; there are no fallback credentials. Production seeding does not create demo applications.
 
 ## SDU Authentication
 

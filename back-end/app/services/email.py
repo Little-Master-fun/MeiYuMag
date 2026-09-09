@@ -1,4 +1,5 @@
 import smtplib
+import ssl
 from email.message import EmailMessage
 
 from app.core.config import settings
@@ -18,10 +19,16 @@ class EmailService:
         message["Subject"] = subject
         message.set_content(body)
 
-        with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as smtp:
-            smtp_security = settings.smtp_security.lower()
+        smtp_security = settings.smtp_security.lower()
+        connection = (
+            smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=20,
+                             context=ssl.create_default_context())
+            if smtp_security == "ssl" else
+            smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=20)
+        )
+        with connection as smtp:
             if smtp_security == "starttls":
-                smtp.starttls()
+                smtp.starttls(context=ssl.create_default_context())
             if settings.smtp_username and settings.smtp_password:
                 smtp.login(settings.smtp_username, settings.smtp_password)
             smtp.send_message(message)

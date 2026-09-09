@@ -37,3 +37,10 @@ logs/
 
 # Nested repository metadata backups
 .nested-git-backups/
+
+# Android build outputs and signing secrets
+artifacts/
+*.apk
+*.aab
+*.jks
+*.keystore

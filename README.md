@@ -464,6 +464,8 @@ stateDiagram-v2
 
 前端使用 Vue 3 和 Vite。
 
+Android 测试版使用 Tauri 2，构建、安装和首次服务器设置见 [Android 说明](front-end/ANDROID.md)。
+
 ```sh
 cd front-end
 pnpm install

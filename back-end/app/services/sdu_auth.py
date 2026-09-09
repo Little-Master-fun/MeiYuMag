@@ -38,7 +38,8 @@ class SduAuthService:
             datetime.now() + timedelta(seconds=120),
         )
         response = Response(upstream.content, media_type="image/gif")
-        response.set_cookie("login_session", session_id, max_age=120, httponly=True)
+        response.set_cookie("login_session", session_id, max_age=120, httponly=True,
+                            secure=settings.app_env == "production", samesite="lax")
         return response
 
     async def send_sms_code(self, request: Request, mobile: str, code: str) -> None:
