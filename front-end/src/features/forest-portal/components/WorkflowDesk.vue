@@ -42,6 +42,15 @@ const filter = ref(''),
 const kind = ref<'venue' | 'key'>('venue'),
   venueId = ref(props.initialVenueId ?? 0)
 const date = ref(props.initialDate || getLocalDateKey(offsetDate(new Date(), 1)))
+const manualVenueId = ref(0), manualOrganization = ref(''), manualKeyName = ref('')
+const manualSlots = ref([{ start_at: '', end_at: '' }])
+const inputDate = (s: string | null) => s ? new Intl.DateTimeFormat('sv-SE', {
+  timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+}).format(new Date(/Z$|[+-]\d\d:\d\d$/.test(s) ? s : `${s}+08:00`)).replace(' ', 'T') : ''
+const reviewSlots = () => {
+  if (manualSlots.value.some(s => !s.start_at || !s.end_at)) throw new Error('请填写完整借用时间（北京时间）')
+  return manualSlots.value.map(s => ({ start_at: `${s.start_at}:00+08:00`, end_at: `${s.end_at}:00+08:00` }))
+}
 const templates = ref<Array<{ name: string; application_type: string; download_url: string }>>([])
 const admin = computed(() => props.mode === 'admin' && auth.isAdmin)
 const visibleApplications = computed(() =>
@@ -78,7 +87,7 @@ const matchingTemplates = computed(() =>
   templates.value.filter((t) => t.application_type === currentType.value),
 )
 const readableDate = (s: string | null) =>
-  s ? new Date(s).toLocaleString('zh-CN', { hour12: false }) : '待材料确认'
+  s ? new Date(/Z$|[+-]\d\d:\d\d$/.test(s) ? s : `${s}+08:00`).toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' }) : '待材料确认'
 let requestVersion = 0
 
 async function openApplication(id: number) {
@@ -97,6 +106,10 @@ async function openApplication(id: number) {
     files.value = material.data
     reason.value = ''
     requested.value = []
+    manualVenueId.value = detail.data.venue_id ?? 0
+    manualOrganization.value = detail.data.borrow_organization ?? detail.data.organization ?? ''
+    manualKeyName.value = detail.data.borrowed_key_name ?? ''
+    manualSlots.value = [{ start_at: inputDate(detail.data.start_at), end_at: inputDate(detail.data.end_at) }]
   } catch (e) {
     if (version === requestVersion) error.value = getSubmissionErrorMessage(e)
   } finally {
@@ -128,7 +141,7 @@ async function load() {
   }
 }
 async function act(
-  action: 'cancel' | 'submitted' | 'completed' | 'rejected' | 'supplement' | 'legacy-reject',
+  action: 'cancel' | 'submitted' | 'completed' | 'rejected' | 'supplement' | 'legacy-reject' | 'manual-pass',
 ) {
   if (!selected.value || busy.value) return
   if (['rejected', 'supplement', 'legacy-reject'].includes(action) && !reason.value.trim()) {
@@ -150,6 +163,11 @@ async function act(
         file_types: requested.value,
         reason: reason.value,
       })
+    else if (action === 'manual-pass')
+      await axios.post(`/api/v1/admin/applications/${id}/pre-review-decision`, {
+        passed: true, venue_id: manualVenueId.value || undefined,
+        borrow_organization: manualOrganization.value.trim(), time_slots: reviewSlots(),
+      })
     else if (action === 'legacy-reject')
       await axios.post(`/api/v1/admin/applications/${id}/pre-review-decision`, {
         passed: false,
@@ -159,6 +177,9 @@ async function act(
       await axios.patch(`/api/v1/admin/applications/${id}/status`, {
         status: action === 'cancel' ? 'cancelled' : action,
         reason: reason.value || undefined,
+        key_details: action === 'submitted' && selected.value.application_type === 'key_borrow'
+          ? { borrowed_key_name: manualKeyName.value.trim(), borrow_organization: manualOrganization.value.trim(), ...reviewSlots()[0] }
+          : undefined,
       })
     await openApplication(id)
     applications.value = applications.value.map((a) => (a.id === id ? selected.value! : a))
@@ -286,9 +307,15 @@ onBeforeUnmount(() => {
             </button>
           </div>
         </div>
-        <p v-else class="empty-note">
-          带上一份填写完整的 PDF 钥匙借用申请表，写明借用名称、组织及借还时间。
-        </p>
+        <div v-else>
+          <p class="empty-note">
+            图片示例仅供参考。请填写钥匙名称、组织及借还时间并签名，提交清晰完整的 PDF 扫描件。无需 OCR，由管理员人工审核，不调用 AI；不要提交普通拍照原图或示例图片。
+          </p>
+          <div class="template-links">
+            <button v-for="t in templates.filter(item => item.application_type === 'key_borrow')"
+              :key="t.name" @click="download(t.download_url, t.name)">↓ 下载钥匙申请图片示例</button>
+          </div>
+        </div>
         <footer>
           <button class="seal-action" @click="begin">前往信箱 <span>↗</span></button>
         </footer>
@@ -341,6 +368,7 @@ onBeforeUnmount(() => {
             >
           </p>
           <p class="date-line">
+            <span v-if="selected.borrowed_key_name">{{ selected.borrowed_key_name }} · </span>
             {{ readableDate(selected.start_at) }} — {{ readableDate(selected.end_at) }}
           </p>
           <blockquote v-if="selected.review_reason">
@@ -396,6 +424,21 @@ onBeforeUnmount(() => {
             class="review-letter"
           >
             <h4>审核批注</h4>
+            <fieldset v-if="selected.status === 'pending_admin_pre_review' || (selected.application_type === 'key_borrow' && selected.status === 'pending_admin_submit')" class="manual-review-fields" :disabled="busy">
+              <legend>对照原件填写 · 北京时间</legend>
+              <p>请先下载并阅读材料。场地通过初审前会再次检查占用冲突；钥匙申请不使用 AI。</p>
+              <label v-if="selected.application_type !== 'key_borrow'">申请场地
+                <select v-model="manualVenueId" aria-label="人工审核场地"><option :value="0" disabled>请选择场地</option><option v-for="v in venues" :key="v.id" :value="v.id">{{ v.name }}</option></select>
+              </label>
+              <label v-else>钥匙名称<input v-model="manualKeyName" maxlength="255" aria-label="人工审核钥匙名称" /></label>
+              <label>借用组织<input v-model="manualOrganization" maxlength="255" aria-label="人工审核借用组织" /></label>
+              <div v-for="(slot, index) in manualSlots" :key="index" class="manual-slot">
+                <label>开始时间<input v-model="slot.start_at" type="datetime-local" :aria-label="`借用开始时间 ${index + 1}`" /></label>
+                <label>{{ selected.application_type === 'key_borrow' ? '归还时间' : '结束时间' }}<input v-model="slot.end_at" type="datetime-local" :aria-label="`借用结束时间 ${index + 1}`" /></label>
+                <button v-if="manualSlots.length > 1" type="button" @click="manualSlots.splice(index, 1)">移除此时段</button>
+              </div>
+              <button v-if="selected.status === 'pending_admin_pre_review' && manualSlots.length < 20" type="button" @click="manualSlots.push({start_at: '', end_at: ''})">＋ 添加借用时段</button>
+            </fieldset>
             <textarea
               v-model="reason"
               maxlength="1000"
@@ -438,9 +481,10 @@ onBeforeUnmount(() => {
                 </button>
               </div>
             </template>
-            <button v-else :disabled="busy" @click="act('legacy-reject')">
-              退回修正 · 重新进行初审
-            </button>
+            <div v-else class="review-actions">
+              <button :disabled="busy" @click="act('legacy-reject')">退回修正 · 重新进行初审</button>
+              <button class="seal-action" :disabled="busy" @click="act('manual-pass')">人工初审通过 · 待签章</button>
+            </div>
           </div>
           <footer v-if="canCancel">
             <button
@@ -584,6 +628,8 @@ h4 small {
 }
 select,
 input[type='date'],
+input[type='datetime-local'],
+.manual-review-fields input,
 textarea {
   box-sizing: border-box;
   background: #fff9e740;
@@ -721,6 +767,10 @@ blockquote small {
   resize: vertical;
   line-height: 1.7;
 }
+.manual-review-fields { margin: 20px 0; padding: 16px; border: 1px dashed #a7997866; min-width: 0; }
+.manual-review-fields label { display: grid; gap: 8px; margin: 12px 0; min-width: 0; }
+.manual-review-fields input, .manual-review-fields select { width: 100%; color: inherit; font: inherit; }
+.manual-slot { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 12px; }
 .review-letter p {
   font-size: 14px;
 }

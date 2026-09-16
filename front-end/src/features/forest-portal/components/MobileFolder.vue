@@ -54,7 +54,7 @@ const eventLabel = (status: string) =>
     reserved: '已预约',
     pre_reserved: '预占用',
     supplement_required: '待补充',
-    pending_admin_pre_review: '审核中',
+    pending_admin_pre_review: '待人工初审',
   })[status] || '审核中'
 const time = (date: string) =>
   new Date(date).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })

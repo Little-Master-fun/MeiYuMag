@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { BookOpen, CalendarDays, Download, FileText, FolderOpen, Mail, X } from 'lucide-vue-next'
+import { BookOpen, CalendarDays, Download, FileText, BadgeCheck, FileSignature, X } from 'lucide-vue-next'
 import { loadMaterialLibrary, type MaterialTemplate } from '../materialLibrary'
 import { downloadMaterial } from '../workflow'
 
@@ -30,32 +30,33 @@ const visibleTemplates = computed(() =>
     (item) =>
       group.value === 'all' ||
       item.application_type === group.value ||
-      item.application_type === 'all',
+      (group.value !== 'key_borrow' && item.application_type === 'all'),
   ),
 )
 const steps = [
   {
     icon: CalendarDays,
-    title: '在日历选一天',
-    text: '进入场地日历，用两侧书签选择场地。日历展示今天前后各 15 天；日期中的色条表示不同申请状态。点击可申请日期，或从个人首页的“场地申请”进入。',
+    title: '查看空闲',
+    text: '可先到场地日历查看今天前后各 15 天的占用情况，再点击可申请日期或个人首页的“场地申请”直接前往信箱。无需重复选择场地和日期，实际申请信息以文件为准。',
   },
   {
     icon: FileText,
-    title: '按木牌准备材料',
-    text: '确认申请场地和日期，下载示例或模板。美育馆初审提交申请表，悦园三楼提交策划书，均为一份 DOCX；钥匙借用提交一份 PDF。文件中的场地和日期须与所选信息一致。',
+    title: '提交材料',
+    text: '按木牌或材料库下载示例或模板。美育馆提交申请表，悦园三楼提交活动策划书，初审只需一份 DOCX，不用另附证明或说明材料。文件须写明完整场地名称、日期和具体时段；点击信封或拖入文件暂存，核对后点击“封缄并送出”，由 AI 识别并预审核。',
   },
   {
-    icon: Mail,
-    title: '把文件放进信封',
-    text: '点击 3D 信封或拖入文件，先在气泡里暂存；可继续添加、删除。签章或补交阶段要为每份文件选择材料用途。核对清单后点击“封缄并送出”，才会上传。',
+    icon: BadgeCheck,
+    title: '预审核通过',
+    text: 'AI 检查申请材料，系统核对场地、日期与占用冲突。AI 请求失败时材料自动转人工初审，并邮件通知管理员，无需重复提交。通过后场地进入预占用，显示“待签章材料”；未通过可查看原因并修改重提。预审核通过不代表最终获准使用。',
   },
   {
-    icon: FolderOpen,
-    title: '回到文件夹查进度',
-    text: '上传完成后返回文件夹。在个人首页或申请档案查看状态、审核原因和文件版本；需要签章、补交或重新初审时，从该申请继续前往信箱。',
+    icon: FileSignature,
+    title: '提交签字盖章材料',
+    text: '预审核通过后，按清单完成签字盖章。在个人首页或申请档案中打开原申请，回到信箱上传材料。支持 Word 或 PDF 扫描件，请包含签字盖章页，不接受普通拍照照片。签章材料由管理员人工核对，不接入 AI；确认后才算申请成功。',
   },
 ]
 const statuses = [
+  { label: '待人工初审', tone: 'stone', text: 'AI 暂时无法审核或无法确认场地时，系统保存材料并邮件通知管理员接手。人工核实场地与时段前不会预占用。' },
   {
     label: '初审未通过',
     tone: 'rust',
@@ -186,11 +187,11 @@ onBeforeUnmount(() => previousFocus?.isConnected && previousFocus.focus())
       <div ref="pageScroll" class="guide-scroll">
         <Transition name="guide-page" mode="out-in">
           <div v-if="tab === 'steps'" key="steps" class="guide-content">
-            <div class="journey-strip" aria-label="日历选场地，准备材料，信封提交，档案查进度">
+            <div class="journey-strip" aria-label="查看空闲，提交材料，预审核通过，提交签字盖章材料">
               <template v-for="(step, index) in steps" :key="step.title"
                 ><span
                   ><component :is="step.icon" :size="26" :stroke-width="1.25" /><small>{{
-                    ['选日期', '备材料', '寄申请', '查进度'][index]
+                    step.title
                   }}</small></span
                 ><i v-if="index < 3" aria-hidden="true">⤳</i></template
               >
@@ -224,19 +225,21 @@ onBeforeUnmount(() => previousFocus?.isConnected && previousFocus.focus())
                 申请账号需具备场地申请权限。空闲日期只是当前占用情况，实际提交时系统仍会检查时间冲突，预占用不等于最终许可。
               </p>
               <p>
-                初审主文件为一份 DOCX；钥匙借用为一份 PDF。附加材料支持
+                初审只需一份 DOCX；钥匙借用为一份 PDF。签章或按要求补交的材料支持
                 DOC、DOCX、PDF、JPG、JPEG、PNG，每份不超过 30 MB，一次最多 10 份、合计不超过 100
                 MB。
               </p>
               <p>
                 信封暂存发生在当前页面，刷新或关闭页面不会保留未上传文件。请等到上传成功再离开；失败时先核对提示，不要反复新建同一申请。
               </p>
-              <p>钥匙借用走独立申请流程：系统提取 PDF 信息后交管理员审核，不等同于场地初审通过。</p>
+              <p>钥匙借用走独立人工审核流程：提交 PDF 后由管理员核对并填写借用信息，不调用 AI，不等同于场地初审通过。</p>
+              <p><strong>签章材料支持 Word 或 PDF 扫描件，由管理员人工核对，请包含签字盖章页。</strong>不接受普通拍照照片。</p>
+              <p>钥匙申请可提交清晰完整的 PDF 扫描件，无需 OCR；不要直接上传普通拍照原图。示例图片仅供参考，不能直接作为申请提交。</p>
             </section>
           </div>
           <div v-else key="materials" class="guide-content">
             <p class="guide-intro">
-              “模板”是项目已有原表；“填写示例”用于理解所需信息，含虚构内容，不能原样提交。签章材料请填写原表、打印签章后扫描，示例不含有效签章。
+              “模板”是项目已有原表；“填写示例”仅供参考，不能原样提交。美育馆示例使用提供的活动申请表，钥匙借用只提供图片示例。纸质材料请填写并签名后扫描，不要直接提交普通拍照原图。
             </p>
             <nav class="material-filters" aria-label="按申请类型筛选材料">
               <button
@@ -260,7 +263,7 @@ onBeforeUnmount(() => previousFocus?.isConnected && previousFocus.focus())
                     >{{ item.kind === 'example' ? '填写示例' : '原表模板' }} ·
                     {{ item.name.split('.').pop()?.toUpperCase() }}</span
                   >
-                  <h2>{{ item.name.replace(/\.(docx|pdf)$/i, '') }}</h2>
+                  <h2>{{ item.name.replace(/\.(docx|pdf|png|jpe?g)$/i, '') }}</h2>
                   <p>{{ item.description }}</p>
                 </div>
                 <button
@@ -278,7 +281,10 @@ onBeforeUnmount(() => previousFocus?.isConnected && previousFocus.focus())
           </div>
         </Transition>
       </div>
-      <footer class="guide-footer">使用时也可以直接点击信箱木牌上的材料名称取阅。</footer>
+      <footer class="guide-footer">
+        使用时也可以直接点击信箱木牌上的材料名称取阅。<br>
+        有问题请联系 <a href="mailto:littlemasterfun@gmail.com">littlemasterfun@gmail.com</a>
+      </footer>
     </section>
   </div>
 </template>
@@ -409,9 +415,10 @@ button:focus-visible {
   padding: 22px 0 12px;
 }
 .journey-strip {
-  display: flex;
-  align-items: center;
-  justify-content: space-around;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1fr) 20px minmax(0, 1fr) 20px minmax(0, 1fr);
+  align-items: start;
+  gap: 4px;
   padding: 16px 4px 22px;
   color: #6b795b;
 }
@@ -419,14 +426,20 @@ button:focus-visible {
   display: grid;
   justify-items: center;
   gap: 10px;
+  min-width: 0;
+  text-align: center;
 }
 .journey-strip small {
   font-size: 12px;
+  line-height: 1.6;
+  text-wrap: balance;
 }
 .journey-strip i {
   color: #aa9566;
   font-size: 26px;
   font-style: normal;
+  line-height: 26px;
+  text-align: center;
 }
 .guide-steps {
   list-style: none;
@@ -598,6 +611,16 @@ p {
   border-top: 1px solid #b7a27055;
   font-size: 12px;
   line-height: 1.6;
+}
+.guide-footer a {
+  color: #53694f;
+  text-decoration-color: #879276;
+  text-underline-offset: 3px;
+  overflow-wrap: anywhere;
+}
+.guide-footer a:hover,
+.guide-footer a:focus-visible {
+  color: #614a2c;
 }
 .guide-page-enter-active,
 .guide-page-leave-active {

@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   findMaterialTemplate,
+  applicationDownloadRequirements,
   materialType,
   type MaterialTemplate,
 } from '../src/features/forest-portal/materialLibrary.ts'
@@ -35,7 +36,7 @@ const catalog: MaterialTemplate[] = [
   },
   {
     id: 'key',
-    name: '钥匙.pdf',
+    name: '钥匙示例.png',
     application_type: 'key_borrow',
     file_type: 'key_borrow_application',
     download_url: '/key',
@@ -48,6 +49,19 @@ const catalog: MaterialTemplate[] = [
     download_url: '/support',
   },
 ]
+test('reference buttons separate three Yueyuan originals from the planning example', () => {
+  const yueyuan = applicationDownloadRequirements('yueyuan_third_floor')
+  assert.equal(yueyuan.length, 2)
+  assert.equal(yueyuan[0]!.bundleId, 'yueyuan')
+  assert.equal(yueyuan[1]!.templateId, 'yueyuan_plan_example')
+  const meiyu = applicationDownloadRequirements('meiyu_venue')
+  assert.deepEqual(meiyu.map(item => item.templateId), ['meiyu_activity_application', 'meiyu_application_example'])
+  const example = { ...catalog[1]!, id: 'yueyuan_plan_example' }
+  assert.equal(findMaterialTemplate([example], yueyuan[1]!, target), example)
+  assert.equal(findMaterialTemplate(catalog, yueyuan[1]!, target), undefined)
+  // Reference downloads must not turn the initial upload into a three-file requirement.
+  assert.equal(getSubmissionGuide({ ...target, mode: 'new' }).requirements.length, 1)
+})
 test('initial and retry requirements select the example for the actual application type', () => {
   for (const mode of ['new', 'resubmit'] as const) {
     const plain = { ...target, mode }
@@ -79,14 +93,17 @@ test('scan requirements download the corresponding original, not another applica
     undefined,
   )
 })
-test('key and optional supporting references are available, unknown materials never get an unrelated fallback', () => {
+test('key and administrator-requested supporting references remain available', () => {
   const key = { ...target, mode: 'key' as const }
   assert.equal(
     findMaterialTemplate(catalog, getSubmissionGuide(key).requirements[0]!, key)?.id,
     'key',
   )
+  assert.match(findMaterialTemplate(catalog, getSubmissionGuide(key).requirements[0]!, key)!.name, /\.png$/)
+  assert.equal(getSubmissionGuide(key).requirements[0]!.extension, '.pdf')
+  assert.match(getSubmissionGuide(key).description, /扫描.*OCR/)
   assert.equal(
-    findMaterialTemplate(catalog, getSubmissionGuide(target).requirements[1]!, target)?.id,
+    findMaterialTemplate(catalog, { label: '说明材料', fileType: 'supporting_material', kind: 'any', extension: '' }, target)?.id,
     'support',
   )
   assert.equal(

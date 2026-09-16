@@ -13,7 +13,7 @@ export const applicationStatusLabels: Record<string, string> = {
   completed: '已完成',
   rejected: '审核未通过',
   cancelled: '已取消',
-  pending_admin_pre_review: '历史初审待处理',
+  pending_admin_pre_review: '待人工初审',
 }
 export const fileLabels: Record<string, string> = {
   pre_review_word: '初审申请文件',

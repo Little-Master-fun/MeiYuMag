@@ -20,10 +20,13 @@ cp .env.example .env
 Set local secrets in `.env`. The AI pre-review service uses an OpenAI-compatible chat completions endpoint:
 
 ```env
-AI_API_BASE_URL=https://xplt.sdu.edu.cn:4000
+AI_API_BASE_URL=https://llm.zerohyh.top/v1
 AI_API_KEY=your-api-key
 AI_MODEL=Ali-dashscope/MiniMax-M2.5
 ```
+
+The base URL may include `/v1` or just the server root. The backend appends
+`/chat/completions` without duplicating the version prefix.
 
 Run locally:
 
@@ -250,19 +253,31 @@ Authorization: Bearer <access_token>
 Form fields:
 
 ```text
-application_type=meiyu_venue | yueyuan_third_floor
-venue_id=1
+application_type=auto (default)
 file=<.docx Word document>
-additional_files=<optional supporting document, repeatable>
 ```
+
+The user-facing flow goes straight to the envelope and accepts one DOCX, without
+a venue/date form or optional supporting-material upload. AI identifies the venue
+and dates from the document; the backend resolves the venue against the catalog
+and determines the application type. Unknown/ambiguous venues and AI service
+failures save the material and return `next_status=pending_admin_pre_review`,
+notifying administrators without creating a reservation. A successful upload to
+this queue has `passed=false` because review has not finished; it is not a material
+rejection and should not prompt the user to upload again. Document times use Asia/Shanghai.
+
+For older clients, explicit `venue_id`, `application_type` (`meiyu_venue` or
+`yueyuan_third_floor`), `expected_date`, and repeatable `additional_files` remain
+supported. Explicit venue/date values are still cross-checked against the document.
 
 Flow:
 
 ```text
 Upload Word document
 -> backend extracts paragraphs and table text from .docx
--> backend selects prompt by application_type
+-> backend uses the automatic venue-review prompt (including Yueyuan planning rules)
 -> AI extracts structured venue/time/application info
+-> backend matches the venue to a real catalog entry and determines application_type
 -> backend checks time conflicts against ReservationCalendar
 -> if passed, backend creates Application, stores the Word file, and writes pre_reserved calendar records
 -> if rejected, backend stores the reason with status ai_rejected and does not occupy the calendar
@@ -404,7 +419,7 @@ Form fields:
 file=<PDF scanned key borrowing application>
 ```
 
-The endpoint extracts readable PDF text, sends it to AI, stores the borrow organization, borrowed key name, and borrowing time in `KeyBorrowRecord`, stores the uploaded PDF, and creates an application with `application_type=key_borrow` and `status=pending_admin_submit`.
+The endpoint saves the PDF and creates a `key_borrow` application in `pending_admin_submit`, notifying administrators by email. It does not call AI or require OCR; image-only scanned PDFs are accepted. Administrators must read the original and supply `key_details` (borrowed_key_name, borrow_organization, start_at, end_at) when confirming via the status endpoint. Empty metadata cannot be approved.
 
 ## Admin APIs
 
@@ -433,7 +448,9 @@ cancelled
 rejected
 ```
 
-Legacy manual handling for applications already waiting for admin pre-review:
+AI request/configuration/response failures and unresolved venues enter `pending_admin_pre_review` and notify administrators by email, rather than rejecting the user's materials. These applications do not reserve a venue until manual approval. Signed Word/PDF materials are also reviewed manually without AI.
+
+Manual initial review (requires complete metadata; rechecks time conflicts and Yueyuan date rules):
 
 ```text
 POST /api/v1/admin/applications/{application_id}/pre-review-decision
@@ -442,7 +459,10 @@ POST /api/v1/admin/applications/{application_id}/pre-review-decision
 ```json
 {
   "passed": true,
-  "reason": "人工确认材料可通过初审。"
+  "reason": "人工确认材料可通过初审。",
+  "venue_id": 1,
+  "borrow_organization": "申请组织",
+  "time_slots": [{"start_at": "2035-12-20T09:00:00+08:00", "end_at": "2035-12-20T11:00:00+08:00"}]
 }
 ```
 

@@ -2,6 +2,8 @@ import axios from 'axios'
 import type { ApplicationNavigationTarget, StagedSubmissionFile } from './types'
 
 export interface SubmissionRequirement {
+  templateId?: string
+  bundleId?: 'yueyuan'
   fileType?: string
   label: string
   extension: string
@@ -39,7 +41,8 @@ export function getSubmissionGuide(target: ApplicationNavigationTarget): Submiss
         kind: 'any',
       })),
       description:
-        target.reviewReason || '请为信封里的每份文件选择对应材料，清单齐全后即可封缄送出。',
+        (target.reviewReason || '请为信封里的每份文件选择对应材料，清单齐全后即可封缄送出。')
+        + ' 签章材料由管理员人工核对，不使用 AI，支持 Word 或 PDF 扫描件。请包含签字盖章页，不接受普通拍照照片。有问题请联系 littlemasterfun@gmail.com。',
     }
   }
   if (target.mode === 'key')
@@ -48,7 +51,7 @@ export function getSubmissionGuide(target: ApplicationNavigationTarget): Submiss
       step: '钥匙借用',
       title: '递交钥匙借用申请',
       requirements: [{ label: '钥匙借用申请表', extension: '.pdf', kind: 'primary' }],
-      description: '请上传一份 PDF，写明钥匙名称、借用组织、借用时间和预计归还时间。',
+      description: '点击材料名下载图片示例，仅供填写参考。请填写钥匙名称、借用组织、借还时间并签名，提交清晰完整的 PDF 扫描件，无需 OCR。由管理员人工审核，不调用 AI。不要直接上传普通拍照原图。',
     }
   if (target.mode === 'resubmit') {
     return {
@@ -65,7 +68,7 @@ export function getSubmissionGuide(target: ApplicationNavigationTarget): Submiss
           kind: 'primary',
         },
       ],
-      description: '新文件会保存为当前申请的新版本，并立即重新进入 AI 初审。',
+      description: '新文件会保存为当前申请的新版本，并重新进入初审；AI 暂时不可用时自动转人工初审并通知管理员，无需重复上传。',
     }
   }
 
@@ -82,9 +85,8 @@ export function getSubmissionGuide(target: ApplicationNavigationTarget): Submiss
         extension: '.docx',
         kind: 'primary',
       },
-      { label: '证明或说明材料', extension: '可选 · 可多份', kind: 'optional' },
     ],
-    description: `所选日期：${target.date}。文件中的场地和日期需与本次选择一致，系统将检查占用冲突。`,
+    description: '请提交一份 .docx 申请文件（悦园三楼提交活动策划书），写明完整场地名称、使用日期和具体起止时间。AI 将读取文件，系统检查场地与占用冲突，无需另选场地或日期。',
   }
 }
 
@@ -202,6 +204,7 @@ export async function uploadApplicationFiles(
       `/api/v1/applications/${target.applicationId}/pre-review`,
       formData,
     )
+    if (data?.next_status === 'pending_admin_pre_review') return { mode: 'success', message: '材料已收妥并转交人工初审，系统已发起管理员邮件通知，请在个人首页查看进度' }
     return {
       mode: data?.passed ? 'success' : 'error',
       message: data?.passed
@@ -210,13 +213,9 @@ export async function uploadApplicationFiles(
     }
   }
 
-  formData.append(
-    'application_type',
-    target.venueName.includes('悦园三楼') ? 'yueyuan_third_floor' : 'meiyu_venue',
-  )
-  formData.append('venue_id', String(target.venueId))
-  formData.append('expected_date', target.date)
+  formData.append('application_type', 'auto')
   const { data } = await axios.post('/api/v1/applications/pre-review', formData)
+  if (data?.next_status === 'pending_admin_pre_review') return { mode: 'success', message: '材料已收妥并转交人工初审，系统已发起管理员邮件通知，请在个人首页查看进度' }
   return {
     mode: data?.passed ? 'success' : 'error',
     message: data?.passed
@@ -230,10 +229,14 @@ export function validateSubmission(
   files: StagedSubmissionFile[],
 ): string | null {
   if (!files.length) return '请先将材料放入信封'
+  if (!target.mode || target.mode === 'new') {
+    return files.length === 1 && files[0]!.file.name.toLowerCase().endsWith('.docx')
+      ? null : '初次申请只需一份 .docx 申请文件，不需要另附证明或说明材料'
+  }
   if (target.mode === 'key')
     return files.length === 1 && files[0]!.file.name.toLowerCase().endsWith('.pdf')
       ? null
-      : '钥匙借用请提交一份 PDF'
+      : '钥匙借用请提交一份 PDF；纸质材料请扫描成 PDF，不要直接上传普通拍照原图或示例图片'
   if (target.mode === 'signed' || target.mode === 'supplement') {
     const required = target.requiredFiles ?? []
     if (!required.length) return '材料清单未加载，请返回档案重新打开'

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
 from app.models.application import Application
 from app.models.venue import ReservationCalendar, Venue
+from app.services.business_time import BUSINESS_TZ, local_time
 from app.schemas.venue import (
     CalendarDaySegment,
     CalendarEvent,
@@ -57,8 +58,8 @@ def build_calendar_event(
         organization=application.organization if application else None,
         applicant_name=application.applicant_name if application else None,
         purpose_summary=application.purpose_summary if application else None,
-        start_at=reservation.start_at,
-        end_at=reservation.end_at,
+        start_at=local_time(reservation.start_at),
+        end_at=local_time(reservation.end_at),
         status=reservation.status,
         occupancy_type=occupancy_type(reservation.status),
         color=calendar_color(reservation.status),
@@ -93,8 +94,8 @@ async def get_venue_usage_range(
     venues = list(venues_result.scalars())
     events_by_venue: dict[int, list[CalendarEvent]] = {venue.id: [] for venue in venues}
     venue_by_id = {venue.id: venue for venue in venues}
-    range_start = datetime.combine(start_date, time.min)
-    range_end = datetime.combine(end_date + timedelta(days=1), time.min)
+    range_start = datetime.combine(start_date, time.min, BUSINESS_TZ)
+    range_end = datetime.combine(end_date + timedelta(days=1), time.min, BUSINESS_TZ)
 
     result = await db.execute(
         select(ReservationCalendar, Application)
@@ -102,7 +103,7 @@ async def get_venue_usage_range(
         .where(
             and_(
                 ReservationCalendar.start_at < range_end,
-                ReservationCalendar.end_at >= range_start,
+                ReservationCalendar.end_at > range_start,
                 ReservationCalendar.status != "cancelled",
             )
         )
@@ -150,9 +151,9 @@ async def get_venue_calendar(
         }
         for day in range(1, last_day + 1)
     }
-    month_start_dt = datetime.combine(month_start, time.min)
+    month_start_dt = datetime.combine(month_start, time.min, BUSINESS_TZ)
     next_month = date(year + int(month == 12), 1 if month == 12 else month + 1, 1)
-    next_month_dt = datetime.combine(next_month, time.min)
+    next_month_dt = datetime.combine(next_month, time.min, BUSINESS_TZ)
 
     result = await db.execute(
         select(ReservationCalendar, Application)
@@ -161,7 +162,7 @@ async def get_venue_calendar(
             and_(
                 ReservationCalendar.venue_id == venue_id,
                 ReservationCalendar.start_at < next_month_dt,
-                ReservationCalendar.end_at >= month_start_dt,
+                ReservationCalendar.end_at > month_start_dt,
                 ReservationCalendar.status != "cancelled",
             )
         )
@@ -175,19 +176,24 @@ async def get_venue_calendar(
         title = event.title
         events.append(event)
 
-        day_key = reservation.start_at.date().isoformat()
-        if day_key in days:
+        start_at, end_at = event.start_at, event.end_at
+        day = max(start_at.date(), month_start)
+        while day <= month_end and datetime.combine(day, time.min, BUSINESS_TZ) < end_at:
+            day_start = datetime.combine(day, time.min, BUSINESS_TZ)
+            day_end = day_start + timedelta(days=1)
+            day_key = day.isoformat()
             days[day_key]["event_count"] += 1
             days[day_key]["segments"].append(
                 CalendarDaySegment(
                     event_id=event_id,
-                    start_time=reservation.start_at.strftime("%H:%M"),
-                    end_time=reservation.end_at.strftime("%H:%M"),
+                    start_time=max(start_at, day_start).strftime("%H:%M"),
+                    end_time="24:00" if end_at >= day_end else end_at.strftime("%H:%M"),
                     status=reservation.status,
                     occupancy_type=occupancy_type(reservation.status),
                     title=title,
                 )
             )
+            day += timedelta(days=1)
 
     return VenueMonthCalendarResponse(
         year=year,

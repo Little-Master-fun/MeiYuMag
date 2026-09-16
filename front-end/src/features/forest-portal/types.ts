@@ -30,6 +30,7 @@ export interface PersonalApplicationApi {
   organization?: string | null
   borrow_organization?: string | null
   applicant_name?: string | null
+  borrowed_key_name?: string | null
   applicant_department?: string | null
   application_type: string
   venue_id: number | null

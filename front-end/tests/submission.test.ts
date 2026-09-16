@@ -67,7 +67,7 @@ test('key borrowing accepts only one PDF and Yueyuan uses a planning document', 
   )
 })
 
-test('upload payloads preserve supplement types, signed field names and selected date', async () => {
+test('upload payloads preserve typed follow-ups but new applications use document recognition', async () => {
   const original = axios.defaults.adapter
   const sent: Array<{ url: string; data: FormData }> = []
   axios.defaults.adapter = async (config) => {
@@ -93,9 +93,45 @@ test('upload payloads preserve supplement types, signed field names and selected
     await uploadApplicationFiles({ ...target, mode: 'new' }, [
       { id: 'primary', file: new File(['word'], 'application.docx') },
     ])
-    assert.equal(sent[2]!.data.get('expected_date'), '2035-12-20')
-    assert.equal(sent[2]!.data.get('venue_id'), '1')
+    assert.equal(sent[2]!.data.get('expected_date'), null)
+    assert.equal(sent[2]!.data.get('venue_id'), null)
+    assert.equal(sent[2]!.data.get('application_type'), 'auto')
+    assert.equal(sent[2]!.data.has('additional_files'), false)
   } finally {
     axios.defaults.adapter = original
   }
+})
+
+test('initial submission has only one required Word file and no optional proof material', () => {
+  const initial = { ...target, mode: 'new' as const, venueId: 0, date: '', applicationType: 'auto' }
+  const primary = { id: 'primary', file: new File(['word'], 'application.docx') }
+  assert.equal(validateSubmission(initial, [primary]), null)
+  assert.ok(validateSubmission(initial, [primary, makeFile('proof')]))
+  assert.ok(validateSubmission(initial, [makeFile('proof')]))
+  assert.equal(getSubmissionGuide(initial).requirements.length, 1)
+  assert(!getSubmissionGuide(initial).requirements.some(item => item.kind === 'optional'))
+  assert.match(getSubmissionGuide(initial).description, /无需另选/)
+})
+
+test('signed and supplementary guides explain manual review and Word support', () => {
+  for (const mode of ['signed', 'supplement'] as const) {
+    const guide = getSubmissionGuide({ ...target, mode })
+    assert.match(guide.description, /管理员人工核对/)
+    assert.match(guide.description, /支持 Word 或 PDF 扫描件/)
+    assert.match(guide.description, /littlemasterfun@gmail\.com/)
+  }
+})
+
+test('AI service fallback is an accepted upload, not a material rejection', async () => {
+  const original = axios.defaults.adapter
+  axios.defaults.adapter = async config => ({ data: { passed: false, next_status: 'pending_admin_pre_review' }, status: 200, statusText: 'OK', headers: {}, config })
+  try {
+    for (const mode of ['new', 'resubmit'] as const) {
+      const result = await uploadApplicationFiles({ ...target, mode, venueId: 0 }, [{id: 'word', file: new File(['word'], 'test.docx')}])
+      assert.equal(result.mode, 'success')
+      assert.match(result.message, /人工初审/)
+    }
+    assert.match(getSubmissionGuide({...target, mode:'key'}).description, /无需 OCR/)
+    assert.match(getSubmissionGuide({...target, mode:'key'}).description, /不调用 AI/)
+  } finally { axios.defaults.adapter = original }
 })

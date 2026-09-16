@@ -3,6 +3,7 @@ import json
 import re
 from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import UploadFile
@@ -41,7 +42,7 @@ class AiReviewService:
                 issues=[
                     ReviewIssue(
                         type="AI_REVIEW_REQUEST_FAILED",
-                        message=f"AI 初审请求失败：{exc}",
+                        message=f"AI 初审请求失败（{type(exc).__name__}），请转人工审核。",
                     )
                 ],
             )
@@ -49,7 +50,9 @@ class AiReviewService:
 
     async def call_chat_completion(self, prompt: str, document_text: str) -> dict[str, Any]:
         base_url = settings.ai_api_base_url.rstrip("/")
-        url = f"{base_url}/v1/chat/completions"
+        if not base_url.endswith("/v1"):
+            base_url = f"{base_url}/v1"
+        url = f"{base_url}/chat/completions"
         payload: dict[str, Any] = {
             "model": settings.ai_model,
             "messages": [
@@ -173,12 +176,20 @@ class AiReviewService:
             return None
         for fmt in ("%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M"):
             try:
-                return datetime.strptime(f"{date_value} {time_value}", fmt)
+                return datetime.strptime(f"{date_value} {time_value}", fmt).replace(tzinfo=ZoneInfo("Asia/Shanghai"))
             except ValueError:
                 continue
         return None
 
     def build_prompt(self, application_type: str) -> str:
+        if application_type == "auto":
+            return self.build_prompt("meiyu_venue") + (
+                "用户不再预选场地或日期，必须从文件中识别，不得猜测；场地名称缺失或涉及多个不同场地时，"
+                "venue_name 返回 null 并在 issues 中说明。日期和时间均按中国标准时间（Asia/Shanghai）理解。"
+                "若文件申请悦园三楼，应按活动策划书审核，并额外检查：首页是否包含精确到分钟的借用时间，"
+                "一次申请最多 3 天且多天借用不得为连续自然日，正文活动安排与首页时间是否一致。"
+                "未满足相应要求则 passed 返回 false 并说明原因。"
+            )
         if application_type == "meiyu_venue":
             return (
                 "你是山东大学美育场地申请初审助手。请从 Word 申请文件中提取申请房间、"

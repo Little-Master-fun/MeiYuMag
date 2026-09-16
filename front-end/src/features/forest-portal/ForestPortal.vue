@@ -19,6 +19,7 @@ import {
   Eye,
   EyeOff,
   FileText,
+  KeyRound,
   LockKeyhole,
   Mail,
   RefreshCw,
@@ -50,6 +51,7 @@ import {
   IDLE_FRAME_INTERVAL,
   mailboxDebug,
   MAX_PIXEL_RATIO,
+  SCENE_DEBUG_ENABLED,
   postLoginClipboardDebug,
   postLoginMotionDebug,
   pushedTreeDebug,
@@ -93,7 +95,8 @@ import {
 import WorkflowDesk from './components/WorkflowDesk.vue'
 import ApplicationGuide from './components/ApplicationGuide.vue'
 import { isMobileViewport, mobileEnvelopeLayout, mobilePaperFraming } from './mobileLayout'
-import { downloadRequirement } from './materialLibrary'
+import { paperTextureScale, scenePixelRatio } from './renderQuality'
+import { applicationDownloadRequirements, downloadRequirement, materialType } from './materialLibrary'
 import type { SubmissionRequirement } from './submission'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -148,8 +151,12 @@ function updateVisibleViewport() {
 }
 const venueSelector = ref<HTMLElement | null>(null)
 const applicationTab = ref<HTMLButtonElement | null>(null)
+const keyApplicationTab = ref<HTMLButtonElement | null>(null)
 const applicationFileInput = ref<HTMLInputElement | null>(null)
 const submissionCacheBubble = ref<HTMLElement | null>(null)
+const submissionBubbleVisible = ref(false)
+const submissionGuideVisible = ref(false)
+const submissionGuideInstant = ref(false)
 const submissionBubbleStyle = ref<CSSProperties>({ visibility: 'hidden' })
 const loadingProgress = ref(0)
 const loadError = ref('')
@@ -219,6 +226,7 @@ let mailboxModel: THREE.Object3D | null = null
 let submissionSignModel: THREE.Group | null = null
 let submissionSignTween: gsap.core.Tween | null = null
 let submissionSignTargetY = 0
+let submissionSignExitPending = false
 let resizeObserver: ResizeObserver | null = null
 let animationFrame = 0
 let selectorPositionTimers: Array<ReturnType<typeof setTimeout>> = []
@@ -260,6 +268,11 @@ const pendingSubmissionFiles = ref<StagedSubmissionFile[]>([])
 const submissionGuide = computed(() =>
   submissionContext.value ? getSubmissionGuide(submissionContext.value) : null,
 )
+const submissionDownloadType = ref<'meiyu_venue' | 'yueyuan_third_floor'>('meiyu_venue')
+const submissionReferenceDownloads = computed(() => ['new', 'resubmit'].includes(submissionContext.value?.mode ?? ''))
+const submissionDownloadItems = computed(() => submissionReferenceDownloads.value
+  ? applicationDownloadRequirements(submissionDownloadType.value)
+  : submissionGuide.value?.requirements ?? [])
 const submissionHasPrimaryFile = computed(() =>
   pendingSubmissionFiles.value.some(({ file }) => file.name.toLowerCase().endsWith(submissionContext.value?.mode === 'key' ? '.pdf' : '.docx')),
 )
@@ -578,6 +591,7 @@ function printSubmissionEnvelopeParameters() {
 }
 
 function resetSubmissionEnvelope() {
+  submissionBubbleVisible.value = false
   submissionEnvelopeTween?.kill()
   submissionEnvelopeTween = null
   resetSubmissionEnvelopeFlap()
@@ -597,6 +611,9 @@ function resetSubmissionEnvelope() {
 
 function showSubmissionEnvelope() {
   if (!submissionEnvelope || !camera) return
+  lastSubmissionBubbleLayout = 'hidden'
+  submissionBubbleStyle.value = { visibility: 'hidden' }
+  submissionBubbleVisible.value = true
   submissionEnvelopeTween?.kill()
   resetSubmissionEnvelopeFlap()
   if (submissionEnvelopeReturnTimer) {
@@ -640,6 +657,9 @@ function showSubmissionEnvelope() {
 
 function hideSubmissionEnvelope(onReturned?: () => void) {
   if (!submissionEnvelope || !camera || submissionEnvelopeState === 'hidden') return
+  // Freeze the note at its current screen coordinates and fade it independently
+  // of the returning 3D envelope (both manual return and successful submission).
+  submissionBubbleVisible.value = false
   submissionEnvelopeTween?.kill()
   closeSubmissionEnvelopeFlap()
   const { object, homeParent, homePosition, homeQuaternion, homeScale } = submissionEnvelope
@@ -696,7 +716,8 @@ function hideSubmissionEnvelope(onReturned?: () => void) {
 
 function isPointerOverSubmissionEnvelope(clientX: number, clientY: number) {
   if (
-    !submissionEnvelope?.object.visible
+    !submissionBubbleVisible.value
+    || !submissionEnvelope?.object.visible
     || !renderer
     || !camera
     || submissionEnvelopeState === 'hidden'
@@ -713,6 +734,9 @@ function isPointerOverSubmissionEnvelope(clientX: number, clientY: number) {
 
 let lastBubbleProjectionSignature = ''
 function updateSubmissionBubblePosition() {
+  // Vue keeps the leaving DOM node alive until its opacity transition finishes.
+  // Do not reproject or hide its style while that in-place fade is running.
+  if (!submissionBubbleVisible.value) return
   const bubble = submissionCacheBubble.value
   const envelope = submissionEnvelope?.object
   if (
@@ -814,7 +838,8 @@ function updateSubmissionBubblePosition() {
 
 function openSubmissionFilePicker() {
   if (
-    submissionFilesUploading.value
+    !submissionBubbleVisible.value
+    || submissionFilesUploading.value
     || !['ready', 'drag', 'error'].includes(submissionEnvelopeState)
   ) return
   openSubmissionEnvelopeFlap()
@@ -824,6 +849,10 @@ function openSubmissionFilePicker() {
 function stageSubmissionFiles(files: File[]) {
   if (submissionFilesUploading.value || files.length === 0) return
   const result = mergeSubmissionFiles(pendingSubmissionFiles.value, files)
+  if (submissionContext.value?.mode === 'new') {
+    const error = validateSubmission(submissionContext.value, result.files)
+    if (error) { showSubmissionNotice('error', error, 4200); return }
+  }
   for (const message of result.errors) showSubmissionNotice('error', message, 3600)
   if (!result.acceptedCount) return
   pendingSubmissionFiles.value = result.files
@@ -855,7 +884,7 @@ async function submitStagedApplicationFiles() {
   if (
     !target
     || submissionFilesUploading.value
-    || (!['supplement', 'key'].includes(target.mode ?? '') && target.venueId <= 0)
+    || (!['new', 'resubmit', 'supplement', 'key'].includes(target.mode ?? 'new') && target.venueId <= 0)
   ) return
   if (['resubmit', 'supplement', 'signed'].includes(target.mode ?? '') && !target.applicationId) {
     showSubmissionNotice('error', '当前申请信息不完整，请返回个人首页后重试', 3800)
@@ -898,6 +927,7 @@ async function submitStagedApplicationFiles() {
     void loadVenueUsageBoard()
     submissionEnvelopeReturnTimer = setTimeout(() => {
       submissionEnvelopeReturnTimer = null
+      hideSubmissionSign()
       hideSubmissionEnvelope(() => playPostLoginCamera())
     }, Math.max(submissionEnvelopeDebug.successHold, 0) * 1000)
   } catch (error) {
@@ -1125,6 +1155,9 @@ function updateSubmissionSignLayout() {
 
 function showSubmissionSign() {
   if (!submissionSignModel) return
+  submissionSignExitPending = false
+  submissionGuideInstant.value = false
+  submissionGuideVisible.value = true
   submissionSignTween?.kill()
   updateSubmissionSignLayout()
   submissionSignModel.visible = true
@@ -1154,15 +1187,26 @@ function showSubmissionSign() {
 }
 
 function hideSubmissionSign(immediate = false) {
-  if (!submissionSignModel) return
-  submissionSignTween?.kill()
-  submissionSignTween = null
-
-  if (immediate || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-    submissionSignModel.visible = false
+  const instant = immediate || window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  submissionGuideInstant.value = instant
+  submissionGuideVisible.value = false
+  if (instant) {
+    submissionSignExitPending = false
+    submissionSignTween?.kill()
+    submissionSignTween = null
+    if (submissionSignModel) submissionSignModel.visible = false
     return
   }
+  if (!submissionSignModel?.visible || submissionSignExitPending) return
+  submissionSignTween?.kill()
+  submissionSignTween = null
+  submissionSignExitPending = true
+  // The DOM text fades first. Its after-leave hook starts the 3D board's exit,
+  // so no independently timed animation can leave lettering in mid-air.
+}
 
+function finishSubmissionSignExit() {
+  if (!submissionSignExitPending || !submissionSignModel) return
   submissionSignTween = gsap.to(submissionSignModel.position, {
     y: submissionSignTargetY + 0.035,
     duration: 0.42,
@@ -1170,6 +1214,7 @@ function hideSubmissionSign(immediate = false) {
     onComplete: () => {
       if (submissionSignModel) submissionSignModel.visible = false
       submissionSignTween = null
+      submissionSignExitPending = false
     },
   })
 }
@@ -1242,6 +1287,9 @@ function applyHomeClipboardTransform() {
 
 function createCameraDebugGui(distance: number, target: THREE.Vector3) {
   debugGui?.destroy()
+  debugGui = null
+  if (!SCENE_DEBUG_ENABLED) return
+
   debugGui = new GUI({ title: '开场运镜调试', width: 300 })
   debugGui.domElement.style.left = '16px'
   debugGui.domElement.style.right = 'auto'
@@ -1709,6 +1757,9 @@ function playApplicationCamera(
   clearSubmissionNotice()
   selectedApplicationTarget = target
   submissionContext.value = target
+  if (!preserveSubmissionDraft) {
+    submissionDownloadType.value = materialType(target) === 'yueyuan_third_floor' ? 'yueyuan_third_floor' : 'meiyu_venue'
+  }
   if (!preserveSubmissionDraft) pendingSubmissionFiles.value = []
   submissionFilesUploading.value = false
   applicationStageActive.value = true
@@ -2019,12 +2070,11 @@ function resizeRenderer() {
   mobileViewport.value = isMobileViewport(clientWidth)
   if (debugGui) debugGui.domElement.style.display = mobileViewport.value ? 'none' : ''
 
-  // A DPR of 2 quadruples the fragment workload on Retina displays. The
-  // stylized scene remains crisp at 1.25–1.5 while using substantially less
-  // render-target memory and GPU bandwidth.
-  const largeViewport = clientWidth * clientHeight > 1_500_000
-  const pixelRatioLimit = largeViewport || mobileViewport.value ? 1.25 : MAX_PIXEL_RATIO
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, pixelRatioLimit))
+  const reading = loginSucceeded.value && !cinematicActive.value && !applicationStageActive.value
+  renderer.setPixelRatio(scenePixelRatio(
+    clientWidth, clientHeight, window.devicePixelRatio,
+    mobileViewport.value, reading, MAX_PIXEL_RATIO,
+  ))
   renderer.setSize(clientWidth, clientHeight, false)
   camera.aspect = clientWidth / clientHeight
   camera.updateProjectionMatrix()
@@ -2156,13 +2206,47 @@ function handlePaperPointerLeave() {
   if (renderer) renderer.domElement.style.cursor = ''
 }
 
-async function startNewVenueApplication() {
-  if (applicationTabLoading.value) return
-  if (submissionContext.value && selectedApplicationTarget) {
+function startNewVenueApplication(materialHint?: string) {
+  if (applicationTabLoading.value || cinematicActive.value || applicationStageActive.value) return
+  if (!auth.user?.is_sdu_verified && !auth.user?.is_application_allowed) {
+    showSubmissionNotice('error', '申请权限尚未开通，请先完成身份认证或联系管理员', 4200)
+    return
+  }
+  if (submissionContext.value?.mode === 'key') {
+    if (pendingSubmissionFiles.value.length) {
+      showSubmissionNotice('error', '信封中还有钥匙申请文件，请先完成提交或清空文件后再申请场地', 4200)
+      return
+    }
+  }
+  if (submissionContext.value?.mode !== 'key' && submissionContext.value && selectedApplicationTarget) {
     playApplicationCamera(selectedApplicationTarget, true)
     return
   }
-  desk.value = { mode: 'new', initialVenueId: selectedVenueId.value ?? undefined }
+  // Calendar context selects references only. The upload still asks AI to identify the venue.
+  playApplicationCamera({ venueId: 0, venueName: '自动识别场地', date: '', mode: 'new', applicationType: materialHint?.includes('悦园三楼') ? 'yueyuan_third_floor' : 'auto' })
+}
+
+function startNewKeyApplication() {
+  if (cinematicActive.value || applicationStageActive.value) return
+  if (!auth.user?.is_sdu_verified && !auth.user?.is_application_allowed) {
+    showSubmissionNotice('error', '申请权限尚未开通，请先完成身份认证或联系管理员', 4200)
+    return
+  }
+  if (submissionContext.value?.mode === 'key' && selectedApplicationTarget) {
+    playApplicationCamera(selectedApplicationTarget, true)
+    return
+  }
+  if (pendingSubmissionFiles.value.length) {
+    showSubmissionNotice('error', '信封中还有场地申请文件，请先完成提交或清空文件后再申请钥匙', 4200)
+    return
+  }
+  playApplicationCamera({
+    venueId: 0,
+    venueName: '钥匙借用',
+    date: getLocalDateKey(new Date()),
+    mode: 'key',
+    applicationType: 'key_borrow',
+  })
 }
 
 function handlePaperClick(event: PointerEvent) {
@@ -2187,7 +2271,7 @@ function handlePaperClick(event: PointerEvent) {
   const target = pageContentCanvas.getApplicationTarget(pointer.x, pointer.y)
   if (!target) return
 
-  desk.value = { mode: 'new', initialVenueId: target.venueId, initialDate: target.date }
+  startNewVenueApplication(target.venueName)
 }
 
 let paperTouch: { id: number; y: number; startY: number; moved: boolean } | null = null
@@ -2313,15 +2397,19 @@ function updateVenueSelectorPosition() {
     ?? pageRoot?.querySelector<HTMLElement>('.venue-floating-selector')
     ?? null
   const currentApplicationTab = applicationTab.value
-    ?? pageRoot?.querySelector<HTMLButtonElement>('.application-edge-tab')
+    ?? pageRoot?.querySelector<HTMLButtonElement>('.venue-application-edge-tab')
+    ?? null
+  const currentKeyApplicationTab = keyApplicationTab.value
+    ?? pageRoot?.querySelector<HTMLButtonElement>('.key-application-edge-tab')
     ?? null
   const positioningLayer = currentVenueSelector ?? currentApplicationTab?.parentElement
+    ?? currentKeyApplicationTab?.parentElement
   if (
     !positioningLayer
     || !paperSurfaceMesh
     || !renderer
     || !camera
-    || (!venueSelectorReady.value && !currentApplicationTab)
+    || (!venueSelectorReady.value && !currentApplicationTab && !currentKeyApplicationTab)
   ) return
 
   const selectorBounds = positioningLayer.getBoundingClientRect()
@@ -2417,6 +2505,15 @@ function updateVenueSelectorPosition() {
     currentApplicationTab.style.top = `${minY + paperHeight * 0.86}px`
     currentApplicationTab.style.visibility = 'visible'
   }
+  if (currentKeyApplicationTab) {
+    const gap = Math.max(
+      paperHeight * 0.09,
+      Math.max(currentApplicationTab?.offsetHeight ?? 0, currentKeyApplicationTab.offsetHeight) + 16,
+    )
+    currentKeyApplicationTab.style.left = `${maxX - 5}px`
+    currentKeyApplicationTab.style.top = `${minY + paperHeight * 0.86 - gap}px`
+    currentKeyApplicationTab.style.visibility = 'visible'
+  }
 }
 
 async function scheduleVenueSelectorPositionUpdate() {
@@ -2441,13 +2538,14 @@ watch(
   { flush: 'post' },
 )
 
+watch([loginSucceeded, cinematicActive, applicationStageActive], resizeRenderer, { flush: 'post' })
+
 watch(submissionContext, () => { materialDownloadMessage.value = '' })
 
 watch([loginSucceeded, cinematicActive, () => route.fullPath], () => {
   if (!loginSucceeded.value || cinematicActive.value || applicationStageActive.value) return
   if (route.query.action === 'apply') {
-    const venueId = Number(route.query.venueId)
-    desk.value = {mode:'new', initialVenueId: venueId > 0 ? venueId : undefined, initialDate: typeof route.query.date === 'string' ? route.query.date : undefined}
+    startNewVenueApplication()
     void router.replace({path: '/login'})
   } else if (Number(route.query.application) > 0) {
     desk.value = {mode:'personal', applicationId:Number(route.query.application)}
@@ -2458,7 +2556,7 @@ watch([loginSucceeded, cinematicActive, () => route.fullPath], () => {
 // Template refs are assigned after Transition has mounted its child. Watching
 // the actual DOM refs guarantees a positioning pass at that moment.
 watch(
-  [applicationTab, venueSelector],
+  [applicationTab, keyApplicationTab, venueSelector],
   scheduleVenueSelectorPositionUpdate,
   { flush: 'post' },
 )
@@ -2511,7 +2609,7 @@ function animate(now = performance.now()) {
     updateVenueSelectorPosition()
     lastVenuePositionUpdateAt = now
   }
-  if (now - lastCameraReadoutUpdateAt >= CAMERA_READOUT_INTERVAL) {
+  if (debugGui && now - lastCameraReadoutUpdateAt >= CAMERA_READOUT_INTERVAL) {
     updateCameraReadout()
     lastCameraReadoutUpdateAt = now
   }
@@ -2619,6 +2717,7 @@ onMounted(() => {
       topPage = topPageObject instanceof THREE.Mesh ? topPageObject : null
       pageContentCanvas = createParchmentPageCanvas(
         renderer?.capabilities.getMaxAnisotropy() ?? 1,
+        paperTextureScale(window.devicePixelRatio, renderer?.capabilities.maxTextureSize ?? 4096),
       )
       const leafyTreeParts: THREE.Mesh[] = []
 
@@ -2813,8 +2912,8 @@ onBeforeUnmount(() => {
       ref="applicationFileInput"
       class="submission-file-input"
       type="file"
-      accept=".doc,.docx,.pdf,.jpg,.jpeg,.png"
-      multiple
+      :accept="submissionContext?.mode === 'key' ? '.pdf' : submissionContext?.mode === 'new' ? '.docx' : '.doc,.docx,.pdf,.jpg,.jpeg,.png'"
+      :multiple="submissionContext?.mode !== 'key' && submissionContext?.mode !== 'new'"
       aria-label="选择一份或多份申请材料"
       @change="handleApplicationFileChange"
     />
@@ -2845,9 +2944,9 @@ onBeforeUnmount(() => {
       </aside>
     </Transition>
 
-    <Transition name="submission-guide">
+    <Transition name="submission-guide" :css="!submissionGuideInstant" @after-leave="finishSubmissionSignExit">
       <aside
-        v-if="applicationStageActive && submissionContext && submissionGuide"
+        v-if="applicationStageActive && submissionContext && submissionGuide && submissionGuideVisible"
         class="submission-guide"
         aria-label="当前文件提交说明"
       >
@@ -2860,36 +2959,40 @@ onBeforeUnmount(() => {
         </div>
         <div class="submission-guide-context">
           <span>{{ submissionContext.venueName }}</span>
-          <span>
+          <div v-if="submissionContext.mode === 'new'" class="submission-material-tabs" aria-label="切换下载材料类型" title="仅切换下载材料；申请场地和时间仍由文件识别">
+            <button type="button" :aria-pressed="submissionDownloadType === 'meiyu_venue'" :disabled="!!downloadingRequirement" @pointerdown.stop @click.stop="submissionDownloadType = 'meiyu_venue'; materialDownloadMessage = ''">美育馆</button>
+            <button type="button" :aria-pressed="submissionDownloadType === 'yueyuan_third_floor'" :disabled="!!downloadingRequirement" @pointerdown.stop @click.stop="submissionDownloadType = 'yueyuan_third_floor'; materialDownloadMessage = ''">悦园三楼</button>
+          </div>
+          <span v-else>
             {{ submissionContext.applicationId ? `申请 #${submissionContext.applicationId}` : '新申请' }}
           </span>
         </div>
-        <div v-if="submissionGuide.requirements.length <= 2" class="submission-guide-requirements">
+        <div v-if="submissionDownloadItems.length <= 2" class="submission-guide-requirements">
           <button
-            v-for="requirement in submissionGuide.requirements"
+            v-for="requirement in submissionDownloadItems"
             :key="requirement.label"
             type="button"
             class="submission-guide-requirement"
             :disabled="!!downloadingRequirement"
-            :aria-label="`下载${requirement.label}示例或模板`"
-            :title="`点击下载${requirement.label}的填写示例或原表；签章材料须自行填写签章后扫描`"
+            :aria-label="submissionReferenceDownloads ? `下载${requirement.label}` : `下载${requirement.label}示例或模板`"
+            :title="requirement.bundleId ? '一次下载用电安全承诺书、安全责任书、安全工作排查清单（三份原始模板）' : `点击下载${requirement.label}；签章材料须自行填写签章后扫描`"
             @pointerdown.stop
             @click.stop="downloadSignMaterial(requirement)"
             :class="{
-              fulfilled:
+              fulfilled: !submissionReferenceDownloads && (
                 requirement.fileType
                   ? pendingSubmissionFiles.some(item => item.fileType === requirement.fileType)
                   : requirement.kind === 'optional'
                   ? pendingSubmissionFiles.length > 1
                   : requirement.kind === 'any'
                     ? pendingSubmissionFiles.length > 0
-                    : submissionHasPrimaryFile,
+                    : submissionHasPrimaryFile),
             }"
           >
             <FileText :size="17" :stroke-width="1.55" />
             <span>
               <strong>{{ requirement.label }}</strong>
-              <small>{{ downloadingRequirement === requirement.label ? '正在取阅…' : `${requirement.extension} · 点击取阅 ↓` }}</small>
+              <small>{{ downloadingRequirement === requirement.label ? '正在取阅…' : submissionContext.mode === 'key' ? 'PDF 提交 · 图片示例 ↓' : submissionReferenceDownloads ? `${requirement.extension} ↓` : `${requirement.extension} · 点击取阅 ↓` }}</small>
             </span>
             <i aria-hidden="true" />
           </button>
@@ -2928,7 +3031,7 @@ onBeforeUnmount(() => {
 
     <Transition name="submission-cache">
       <aside
-        v-if="applicationStageActive && submissionContext"
+        v-if="applicationStageActive && submissionContext && submissionBubbleVisible"
         ref="submissionCacheBubble"
         class="submission-cache-bubble"
         :class="{ empty: pendingSubmissionFiles.length === 0 }"
@@ -2978,6 +3081,15 @@ onBeforeUnmount(() => {
           <small>点击 3D 信封或将文件拖放进来</small>
         </p>
 
+        <p v-if="submissionContext.mode === 'key'" class="submission-scan-note">
+          请提交清晰完整的 PDF 扫描件，无需 OCR，由管理员人工审核，不调用 AI。不要上传普通拍照原图或示例图片。
+        </p>
+        <p v-if="submissionContext.mode === 'signed'" class="submission-scan-note submission-help-note">
+          <strong>签章材料由管理员人工核对，支持 Word 或 PDF 扫描件；请包含签字盖章页，不接受普通拍照照片。</strong>
+        </p>
+        <p v-else-if="!submissionContext.mode || ['new', 'resubmit'].includes(submissionContext.mode)" class="submission-scan-note">
+          初审请提交 .docx 申请文件，先暂存，确认后再送出。
+        </p>
         <footer>
           <small v-if="pendingSubmissionFiles.length && !submissionRequirementsSatisfied" class="submission-validation-note">{{ validateSubmission(submissionContext, pendingSubmissionFiles) }}</small>
           <button
@@ -3336,12 +3448,28 @@ onBeforeUnmount(() => {
     <Transition name="application-tab">
       <button
         v-if="loginSucceeded && folderPage === 'profile' && !cinematicActive && !applicationStageActive"
+        ref="keyApplicationTab"
+        class="application-edge-tab key-application-edge-tab"
+        type="button"
+        aria-label="发起钥匙申请"
+        @click="startNewKeyApplication"
+      >
+        <span class="application-tab-sprig" aria-hidden="true"><i /><i /><i /></span>
+        <span>钥匙申请</span>
+        <span class="application-tab-seal key-application-seal" aria-hidden="true">
+          <KeyRound :size="17" :stroke-width="1.6" />
+        </span>
+      </button>
+    </Transition>
+    <Transition name="application-tab">
+      <button
+        v-if="loginSucceeded && folderPage === 'profile' && !cinematicActive && !applicationStageActive"
         ref="applicationTab"
-        class="application-edge-tab"
+        class="application-edge-tab venue-application-edge-tab"
         type="button"
         :disabled="applicationTabLoading"
         aria-label="发起场地申请"
-        @click="startNewVenueApplication"
+        @click="startNewVenueApplication()"
       >
         <span class="application-tab-sprig" aria-hidden="true">
           <i />
@@ -3621,6 +3749,32 @@ onBeforeUnmount(() => {
   font-family: Georgia, serif;
   font-size: 10px;
   letter-spacing: 0.08em;
+}
+.submission-material-tabs {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  pointer-events: auto;
+}
+.submission-material-tabs button {
+  padding: 2px 0;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  background: transparent;
+  color: rgba(255, 235, 192, 0.65);
+  font: inherit;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.submission-material-tabs button[aria-pressed='true'],
+.submission-material-tabs button:hover {
+  color: #f7edca;
+  border-bottom-color: #d0bf91;
+}
+.submission-material-tabs button:focus-visible {
+  outline: 1px solid #d0bf91;
+  outline-offset: 3px;
 }
 
 .submission-guide-requirements {
@@ -3966,6 +4120,17 @@ onBeforeUnmount(() => {
   text-align: center;
 }
 
+.submission-scan-note {
+  margin: 8px 0 12px;
+  color: #786047;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.submission-help-note strong {
+  color: #745335;
+  font-weight: 600;
+}
+
 .submission-cache-empty small {
   color: rgba(87, 70, 41, 0.4);
   font-size: 9px;
@@ -4042,34 +4207,44 @@ onBeforeUnmount(() => {
   opacity: 0.42;
 }
 
-.submission-guide-enter-active,
-.submission-guide-leave-active {
+.submission-guide-enter-active {
   transition:
     opacity 380ms ease,
     transform 520ms cubic-bezier(0.22, 1, 0.36, 1),
     filter 380ms ease;
 }
 
-.submission-guide-enter-from,
-.submission-guide-leave-to {
+.submission-guide-enter-from {
   opacity: 0;
   filter: blur(5px);
   transform: translate(-50%, -18px) rotate(-1deg) scale(0.97);
 }
+.submission-guide-leave-active {
+  transition: opacity 180ms ease;
+  pointer-events: none;
+}
+.submission-guide-leave-to {
+  opacity: 0;
+}
 
-.submission-cache-enter-active,
-.submission-cache-leave-active {
+.submission-cache-enter-active {
   transition:
     opacity 320ms ease,
     transform 460ms cubic-bezier(0.22, 1, 0.36, 1),
     filter 320ms ease;
 }
 
-.submission-cache-enter-from,
-.submission-cache-leave-to {
+.submission-cache-enter-from {
   opacity: 0;
   filter: blur(4px);
   transform: translateY(18px) rotate(-1.5deg) scale(0.96);
+}
+.submission-cache-leave-active {
+  transition: opacity 200ms ease;
+  pointer-events: none;
+}
+.submission-cache-leave-to {
+  opacity: 0;
 }
 
 @media (max-aspect-ratio: 4 / 3), (max-width: 900px) {
@@ -4825,6 +5000,17 @@ onBeforeUnmount(() => {
     inset 0 0 0 5px rgba(236, 194, 149, 0.15);
   transform: translateY(-50%) rotate(-8deg);
   transition: transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.key-application-seal {
+  display: grid;
+  place-items: center;
+  color: #f0d6aa;
+  background: #687a5f;
+  box-shadow:
+    0 3px 7px rgba(45, 59, 38, 0.22),
+    inset 0 0 0 3px rgba(52, 73, 47, 0.5),
+    inset 0 0 0 5px rgba(230, 220, 170, 0.15);
 }
 
 .application-tab-seal i,

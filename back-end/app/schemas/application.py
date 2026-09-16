@@ -40,7 +40,7 @@ class ConflictItem(BaseModel):
 class ApplicationPreReviewResponse(BaseModel):
     passed: bool
     application_type: str
-    venue_id: int
+    venue_id: int | None
     next_status: str
     extracted_time_slots: list[ExtractedTimeSlot]
     issues: list[ReviewIssue]
@@ -62,6 +62,7 @@ class ApplicationRead(BaseModel):
     applicant_department: str | None
     venue_id: int | None
     key_id: int | None
+    borrowed_key_name: str | None = None
     status: str
     start_at: datetime | None
     end_at: datetime | None
@@ -126,6 +127,16 @@ class GenericFilesUploadResponse(BaseModel):
     uploaded_files: list[UploadedSignedFile]
 
 
+class ManualTimeSlot(BaseModel):
+    start_at: datetime
+    end_at: datetime
+
+
+class ManualKeyDetails(ManualTimeSlot):
+    borrowed_key_name: str = Field(min_length=1, max_length=255)
+    borrow_organization: str = Field(min_length=1, max_length=255)
+
+
 class AdminApplicationStatusUpdate(BaseModel):
     status: str = Field(
         description=(
@@ -134,8 +145,12 @@ class AdminApplicationStatusUpdate(BaseModel):
         )
     )
     reason: str | None = Field(default=None, max_length=1000)
+    key_details: ManualKeyDetails | None = None
 
 
 class AdminPreReviewDecision(BaseModel):
     passed: bool
     reason: str | None = Field(default=None, max_length=1000)
+    venue_id: int | None = None
+    borrow_organization: str | None = Field(default=None, max_length=255)
+    time_slots: list[ManualTimeSlot] = Field(default_factory=list, max_length=20)

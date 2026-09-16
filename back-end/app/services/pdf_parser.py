@@ -33,7 +33,7 @@ class PdfParserService:
         if not parsed_text:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No readable text found in PDF. Scanned image PDFs need OCR support.",
+                detail="未识别到 PDF 文字。请在扫描工具中开启文字识别（OCR），导出可搜索的 PDF 后重新上传；当前暂不支持普通照片或无文字层的纯图片 PDF。",
             )
         return parsed_text
 

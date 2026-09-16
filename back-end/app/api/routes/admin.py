@@ -24,6 +24,7 @@ from app.services.expiration import expiration_service
 from app.services.notification import notification_service
 from app.services.application_workflow import FILE_LABELS, TRANSITIONS, signed_file_types, latest_files
 from app.api.routes.applications import application_read_with_review_reason
+from app.services.manual_review import approve_manual_venue, confirm_key_details
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -102,8 +103,12 @@ async def update_application_status(
     if payload.status in {"submitted", "completed"}:
         latest = await latest_files(db, application_id)
         required = signed_file_types(application.application_type)
+        if application.application_type == "key_borrow":
+            required = ["key_borrow_application"]
         if any(key not in latest or latest[key].review_status in {"rejected", "failed"} for key in required):
             raise HTTPException(409, "签章材料缺失或仍有待补交文件，不能确认")
+        if application.application_type == "key_borrow":
+            await confirm_key_details(db, application, payload.key_details, completing=payload.status == "completed")
         for item in latest.values():
             if item.review_status == "pending_admin_review":
                 item.review_status = "passed"
@@ -137,12 +142,15 @@ async def decide_pre_review_application(
         )
 
     pre_review_file = await latest_application_file(db, application_id, "pre_review_word")
+    if pre_review_file is None:
+        raise HTTPException(409, "初审文件缺失，无法审核")
     if payload.passed:
+        await approve_manual_venue(db, application, payload)
         application.status = "pending_signed_files"
+        application.decision_reason = None
         if pre_review_file is not None:
             pre_review_file.review_status = "passed"
             pre_review_file.reject_reason = None
-        await update_reservation_statuses(db, application_id, "pre_reserved")
         user = await db.get(User, application.user_id)
         if user is not None:
             await notification_service.send_and_log(
@@ -158,16 +166,23 @@ async def decide_pre_review_application(
                 ),
             )
     else:
+        if not (payload.reason or "").strip():
+            raise HTTPException(400, "请填写初审未通过原因")
         application.status = "ai_rejected"
         application.decision_reason = payload.reason or "请修正申请材料后重新提交"
         if pre_review_file is not None:
             pre_review_file.review_status = "rejected"
             pre_review_file.reject_reason = payload.reason
         await update_reservation_statuses(db, application_id, "cancelled")
+        user = await db.get(User, application.user_id)
+        if user:
+            await notification_service.send_and_log(db=db, application_id=application.id,
+                recipients=[user.email], notification_type="pre_review_rejected", subject="场地申请人工初审未通过",
+                body=f"申请编号：{application.id}\n未通过原因：{payload.reason}\n请在原申请中修改并重新提交材料。")
 
     await db.commit()
     await db.refresh(application)
-    return ApplicationRead.model_validate(application)
+    return await application_read_with_review_reason(db, application)
 
 
 @router.post("/applications/{application_id}/request-supplement")

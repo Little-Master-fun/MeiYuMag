@@ -16,7 +16,6 @@ from app.schemas.key import (
     KeyResourceUpdate,
 )
 from app.services.file_storage import file_storage_service
-from app.services.key_ai_review import key_ai_review_service
 from app.services.notification import notification_service
 
 router = APIRouter(prefix="/keys", tags=["keys"])
@@ -71,7 +70,6 @@ async def create_key_borrow_application(
         )
 
     await file_storage_service.validate_batch([file])
-    ai_result = await key_ai_review_service.extract_key_borrow_info(file)
     auth_profile_result = await db.execute(
         select(AuthProfile).where(AuthProfile.user_id == current_user.id)
     )
@@ -81,14 +79,11 @@ async def create_key_borrow_application(
     application = Application(
         user_id=current_user.id,
         application_type="key_borrow",
-        organization=ai_result.borrow_organization or current_user.department,
-        borrow_organization=ai_result.borrow_organization,
+        organization=current_user.department,
         applicant_name=auth_profile.name if auth_profile else None,
         applicant_sduid=auth_profile.sduid if auth_profile else None,
         applicant_department=current_user.department,
         status="pending_admin_submit",
-        start_at=ai_result.borrowed_at,
-        end_at=ai_result.expected_return_at,
     )
     db.add(application)
     await db.flush()
@@ -106,24 +101,17 @@ async def create_key_borrow_application(
     db.add(
         KeyBorrowRecord(
             application_id=application.id,
-            borrowed_key_name=ai_result.borrowed_key_name,
-            borrow_organization=ai_result.borrow_organization,
-            borrowed_at=ai_result.borrowed_at,
-            expected_return_at=ai_result.expected_return_at,
         )
     )
     await notification_service.notify_admins(
         db=db,
         application=application,
         notification_type="pending_admin_submit",
-        subject="有钥匙借用申请待管理员提交",
+        subject="有钥匙借用申请待人工审核",
         body=(
-            "用户已提交钥匙借用申请，申请进入待管理员提交状态。\n\n"
+            "用户已提交钥匙借用申请，请下载 PDF 人工核对并填写借用信息。该流程不调用 AI。\n\n"
             f"申请编号：{application.id}\n"
-            f"借用组织：{ai_result.borrow_organization or 'AI 未提取到'}\n"
-            f"借用钥匙：{ai_result.borrowed_key_name or 'AI 未提取到'}\n"
-            f"借用时间：{ai_result.borrowed_at or 'AI 未提取到'}\n"
-            f"预计归还：{ai_result.expected_return_at or 'AI 未提取到'}\n"
+            "借用组织、钥匙名称及借还时间：待管理员根据原件填写\n"
             f"申请人：{application.applicant_name or '未填写'}\n"
             f"申请部门：{application.applicant_department or '未填写'}"
         ),
@@ -132,11 +120,11 @@ async def create_key_borrow_application(
 
     return KeyBorrowResponse(
         application_id=application.id,
-        borrowed_key_name=ai_result.borrowed_key_name,
-        borrow_organization=ai_result.borrow_organization,
+        borrowed_key_name=None,
+        borrow_organization=None,
         status=application.status,
-        borrowed_at=ai_result.borrowed_at,
-        expected_return_at=ai_result.expected_return_at,
-        ai_issues=ai_result.issues,
+        borrowed_at=None,
+        expected_return_at=None,
+        ai_issues=[],
         uploaded_file_version=1,
     )

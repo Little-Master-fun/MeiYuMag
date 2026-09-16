@@ -303,6 +303,10 @@
     top: 7px;
     left: 2px;
   }
+  .key-application-seal svg {
+    width: 11px;
+    height: 11px;
+  }
   .paper-touch-hint {
     position: absolute;
     bottom: calc(46px + env(safe-area-inset-bottom));

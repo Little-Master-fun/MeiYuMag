@@ -1220,12 +1220,14 @@ function drawParchment(
   ctx.fillRect(PAGE_WIDTH - 72, 220 + progress * 850, 7, 80)
 }
 
-export function createParchmentPageCanvas(maxAnisotropy: number): ParchmentPageCanvas {
+export function createParchmentPageCanvas(maxAnisotropy: number, pixelScale = 1): ParchmentPageCanvas {
   const canvas = document.createElement('canvas')
-  canvas.width = PAGE_WIDTH
-  canvas.height = PAGE_HEIGHT
+  canvas.width = Math.floor(PAGE_WIDTH * pixelScale)
+  canvas.height = Math.floor(PAGE_HEIGHT * pixelScale)
   const context = canvas.getContext('2d')
   if (!context) throw new Error('Canvas 2D context is unavailable')
+  // Supersample glyphs without changing the layout, scroll or raycast coordinates.
+  context.setTransform(canvas.width / PAGE_WIDTH, 0, 0, canvas.height / PAGE_HEIGHT, 0, 0)
 
   const today = new Date()
   let board: VenueUsageBoard = {

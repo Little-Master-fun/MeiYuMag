@@ -8,6 +8,7 @@ from app.models.notification import NotificationLog
 from app.models.user import User
 from app.models.venue import ReservationCalendar
 from app.services.notification import notification_service
+from app.services.business_time import BUSINESS_TZ, local_time
 
 
 class ExpirationService:
@@ -16,7 +17,7 @@ class ExpirationService:
         db: AsyncSession,
         now: datetime | None = None,
     ) -> dict[str, int]:
-        current_time = now or datetime.now()
+        current_time = local_time(now) if now else datetime.now(BUSINESS_TZ)
         reminder_count = 0
         cancelled_count = 0
 
@@ -30,14 +31,16 @@ class ExpirationService:
                 )
             )
             .order_by(Application.start_at)
+            .with_for_update()
         )
         applications = result.scalars().all()
 
         for application in applications:
             if application.start_at is None:
                 continue
-            cancel_threshold = application.start_at - timedelta(days=2)
-            reminder_threshold = application.start_at - timedelta(days=3)
+            start_at = local_time(application.start_at)
+            cancel_threshold = start_at - timedelta(days=2)
+            reminder_threshold = start_at - timedelta(days=3)
 
             if current_time >= cancel_threshold:
                 application.status = "cancelled"
@@ -102,7 +105,7 @@ class ExpirationService:
                 )
             )
         )
-        return result.scalar_one_or_none() is not None
+        return result.scalars().first() is not None
 
     async def cancel_reservations(self, db: AsyncSession, application_id: int) -> None:
         result = await db.execute(

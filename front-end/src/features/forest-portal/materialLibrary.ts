@@ -26,6 +26,7 @@ export function findMaterialTemplate(
   requirement: SubmissionRequirement,
   target: ApplicationNavigationTarget,
 ) {
+  if (requirement.templateId) return templates.find(item => item.id === requirement.templateId)
   const type = materialType(target)
   const fileType =
     requirement.fileType ||
@@ -39,6 +40,19 @@ export function findMaterialTemplate(
       (item.application_type === type || item.application_type === 'all') &&
       (item.file_type === fileType || item.aliases?.includes(fileType)),
   )
+}
+
+// Downloads are reference materials, not the list of files required for upload.
+export function applicationDownloadRequirements(type: 'meiyu_venue' | 'yueyuan_third_floor'): SubmissionRequirement[] {
+  return type === 'yueyuan_third_floor'
+    ? [
+        { bundleId: 'yueyuan', label: '申请材料 · 三份', extension: 'ZIP · 一起下载', kind: 'any' },
+        { templateId: 'yueyuan_plan_example', label: '填写示例', extension: '活动策划书 · DOCX', kind: 'any' },
+      ]
+    : [
+        { templateId: 'meiyu_activity_application', label: '场地申请表', extension: '空白原表 · DOCX', kind: 'any' },
+        { templateId: 'meiyu_application_example', label: '填写示例', extension: '填写参考 · DOCX', kind: 'any' },
+      ]
 }
 
 let catalogRequest: Promise<MaterialTemplate[]> | undefined
@@ -57,6 +71,11 @@ export async function downloadRequirement(
   requirement: SubmissionRequirement,
   target: ApplicationNavigationTarget,
 ) {
+  if (requirement.bundleId === 'yueyuan') {
+    const item = { name: '悦园三楼申请材料（三份模板）.zip', download_url: '/api/v1/templates/bundles/yueyuan/download' }
+    await downloadMaterial(item.download_url, item.name)
+    return item
+  }
   const item = findMaterialTemplate(await loadMaterialLibrary(), requirement, target)
   if (!item) throw new Error('这项材料暂未提供示例，请按管理员要求准备，不要使用其他材料代替。')
   await downloadMaterial(item.download_url, item.name)

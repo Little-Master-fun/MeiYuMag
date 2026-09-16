@@ -2,6 +2,8 @@ export const IDLE_FRAME_INTERVAL = 1000 / 30
 export const VENUE_POSITION_INTERVAL = 1000 / 20
 export const CAMERA_READOUT_INTERVAL = 1000 / 10
 export const MAX_PIXEL_RATIO = 1.5
+// Keep tuning values available without mounting the scene's debug controls.
+export const SCENE_DEBUG_ENABLED = false
 
 export const cameraDebug = {
   startX: -0.8613,

@@ -1,7 +1,10 @@
 from pathlib import Path
+from io import BytesIO
+from urllib.parse import quote
+from zipfile import ZipFile, ZIP_DEFLATED
 
 from fastapi import APIRouter, HTTPException, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from app.core.config import settings
 from app.schemas.template import ApplicationTemplateRead
@@ -44,12 +47,12 @@ APPLICATION_TEMPLATES = {
         "description": "现有安全排查清单模板。按实际活动逐项检查后填写。",
     },
     "meiyu_application_example": {
-        "name": "场地申请填写示例.docx",
+        "name": "填写示例.docx",
         "application_type": "meiyu_venue",
         "file_type": "pre_review_word",
         "filename": "meiyu_application_example.docx",
         "kind": "example",
-        "description": "虚构填写示例，用于理解初审所需信息；正式申请请使用原表并填写真实信息。",
+        "description": "提供的活动申请填写参考，保留原文件内容与排版。请勿原样提交；正式申请请填写自己的活动信息。",
     },
     "yueyuan_plan_example": {
         "name": "悦园三楼活动策划书示例.docx",
@@ -61,12 +64,12 @@ APPLICATION_TEMPLATES = {
         "description": "非官方格式的内容示例。请按真实活动修改，签章阶段另附真实签章扫描件。",
     },
     "key_borrow_example": {
-        "name": "钥匙借用填写示例.pdf",
+        "name": "美育钥匙借用示例.png",
         "application_type": "key_borrow",
         "file_type": "key_borrow_application",
-        "filename": "key_borrow_example.pdf",
+        "filename": "key_borrow_example.png",
         "kind": "example",
-        "description": "虚构借用信息示例。提交时请自行填写真实信息并导出一份 PDF。",
+        "description": "图片仅供填写参考，不是待提交材料。请填写自己的信息并签名；纸质材料请扫描，开启文字识别（OCR）并导出可搜索的 PDF。页面须完整、端正、清晰，不要直接上传普通拍照原图；当前暂不支持无文字层的纯图片 PDF。",
     },
     "supporting_material_example": {
         "name": "补充说明填写示例.docx",
@@ -75,14 +78,6 @@ APPLICATION_TEMPLATES = {
         "filename": "supporting_material_example.docx",
         "kind": "example",
         "description": "通用补充说明示例，不替代申请表、正式证明或签章文件。",
-    },
-    "key_borrow_editable_example": {
-        "name": "钥匙借用可编辑示例.docx",
-        "application_type": "key_borrow",
-        "file_type": "key_borrow_editable",
-        "filename": "key_borrow_example.docx",
-        "kind": "example",
-        "description": "可修改的 Word 参考稿。替换为真实信息后导出 PDF 再上传，不能直接提交此 DOCX。",
     },
 }
 
@@ -104,6 +99,29 @@ async def list_application_templates() -> list[ApplicationTemplateRead]:
     ]
 
 
+@router.get("/bundles/yueyuan/download")
+async def download_yueyuan_templates() -> Response:
+    template_ids = (
+        "yueyuan_electricity_commitment",
+        "yueyuan_safety_responsibility",
+        "yueyuan_safety_checklist",
+    )
+    archive = BytesIO()
+    with ZipFile(archive, "w", compression=ZIP_DEFLATED) as bundle:
+        for template_id in template_ids:
+            template = APPLICATION_TEMPLATES[template_id]
+            file_path = TEMPLATE_DIR / template["filename"]
+            if not file_path.is_file():
+                raise HTTPException(404, "Template file not found")
+            bundle.write(file_path, arcname=template["name"])
+    filename = quote("悦园三楼申请材料（三份模板）.zip")
+    return Response(
+        content=archive.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename*=utf-8''{filename}"},
+    )
+
+
 @router.get("/{template_id}/download")
 async def download_application_template(template_id: str) -> FileResponse:
     template = APPLICATION_TEMPLATES.get(template_id)
@@ -116,7 +134,10 @@ async def download_application_template(template_id: str) -> FileResponse:
 
     return FileResponse(
         path=file_path,
-        media_type=("application/pdf" if file_path.suffix == ".pdf" else
-                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+        media_type={
+            ".pdf": "application/pdf",
+            ".png": "image/png",
+            ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        }[file_path.suffix],
         filename=template["name"],
     )

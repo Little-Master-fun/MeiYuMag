@@ -101,5 +101,7 @@ def make_key_pdf():
 if __name__ == "__main__":
     OUTPUT.mkdir(parents=True, exist_ok=True)
     for stem, (title, sections) in EXAMPLES.items():
+        # These references are now supplied originals, not generated fixtures.
+        if stem in {"meiyu_application_example", "key_borrow_example"}:
+            continue
         make_docx(stem, title, sections)
-    make_key_pdf()
