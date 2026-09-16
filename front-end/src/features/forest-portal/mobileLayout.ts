@@ -4,6 +4,18 @@ import type { VenueUsageEvent } from '@/assets/textures/parchmentPage'
 export const MOBILE_BREAKPOINT = 1024
 export const isMobileViewport = (width: number) => width <= MOBILE_BREAKPOINT
 
+export function mobileReaderBounds(left: number, top: number, right: number, bottom: number, viewportHeight: number) {
+  const inset = Math.min(22, (right - left) * 0.055)
+  // Clear the metal clip while keeping the reading area as tall as possible.
+  const contentTop = top + Math.min(52, (bottom - top) * 0.09)
+  return {
+    left: Math.round(left + inset),
+    top: Math.round(contentTop),
+    width: Math.round(right - left - inset * 2),
+    height: Math.max(0, Math.round(Math.min(bottom - 20, viewportHeight - 20) - contentTop)),
+  }
+}
+
 export function mobilePaperFraming(
   width: number,
   height: number,
@@ -11,17 +23,17 @@ export function mobilePaperFraming(
   zoom = 1,
   pan = { x: 0, y: 0 },
 ) {
-  const margin = Math.min(76, width * 0.19)
-  const scale =
-    Math.min(
-      (2 - (4 * margin) / width) / Math.max(bounds.maxX - bounds.minX, 0.001),
-      Math.max(0.1, 2 - 240 / height) / Math.max(bounds.maxY - bounds.minY, 0.001),
-    ) * zoom
+  // Bookmarks now sit inside the mobile reader: give the sheet the screen width.
+  // In landscape crop the lower paper, rather than shrink text to fit its height.
+  const paperWidth = Math.min(width - 36, 600)
+  const scale = (paperWidth * 2 / width) / Math.max(bounds.maxX - bounds.minX, 0.001) * zoom
+  const paperHeight = ((bounds.maxY - bounds.minY) * scale * height) / 2
+  const top = Math.max(76, (height - paperHeight) / 2 - 10)
   return {
     scale,
     offsetX: ((bounds.minX + bounds.maxX) * scale) / 2 - (pan.x * 2) / width,
-    offsetY: ((bounds.minY + bounds.maxY) * scale) / 2 + 34 / height + (pan.y * 2) / height,
-    paperHeight: ((bounds.maxY - bounds.minY) * scale * height) / 2,
+    offsetY: bounds.maxY * scale - 1 + top * 2 / height + (pan.y * 2) / height,
+    paperHeight,
   }
 }
 export function calendarDays(start: string, end: string, events: VenueUsageEvent[]) {

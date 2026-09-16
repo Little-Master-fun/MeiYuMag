@@ -21,6 +21,10 @@
   .forest-desk-tabs button:first-child {
     margin-right: auto;
   }
+  .forest-desk-tabs { flex-wrap: wrap; }
+  /* Mobile bookmarks live on the paper, not in narrow off-paper rails. */
+  .model-page .venue-floating-selector,
+  .model-page .application-edge-tab { display: none; }
   .login-card,
   .login-card.register-card {
     box-sizing: border-box;

@@ -95,7 +95,8 @@ import {
 import WorkflowDesk from './components/WorkflowDesk.vue'
 import ApplicationGuide from './components/ApplicationGuide.vue'
 import InkSceneLoader from './components/InkSceneLoader.vue'
-import { isMobileViewport, mobileEnvelopeLayout, mobilePaperFraming } from './mobileLayout'
+import MobileFolderReader from './components/MobileFolderReader.vue'
+import { isMobileViewport, mobileEnvelopeLayout, mobilePaperFraming, mobileReaderBounds } from './mobileLayout'
 import { paperTextureScale, scenePixelRatio } from './renderQuality'
 import { applicationDownloadRequirements, downloadRequirement, materialType } from './materialLibrary'
 import type { SubmissionRequirement } from './submission'
@@ -106,6 +107,7 @@ const router = useRouter()
 
 const desk = ref<{ mode: 'personal' | 'admin' | 'secondary' | 'new'; applicationId?: number; initialVenueId?: number; initialDate?: string } | null>(null)
 const applicationGuideOpen = ref(false)
+const mobilePaperStyle = ref('visibility:hidden')
 const downloadingRequirement = ref('')
 const materialDownloadMessage = ref('')
 async function downloadSignMaterial(requirement: SubmissionRequirement) {
@@ -284,6 +286,7 @@ const {
   venueOptions,
   venueSelectorReady,
   venueUsageBoard,
+  personalHomeBoard,
 } = useVenueBoards({
   folderPage,
   getCanvas: () => pageContentCanvas,
@@ -2094,6 +2097,7 @@ function resizeRenderer() {
   const { clientWidth, clientHeight } = viewport.value
   if (!clientWidth || !clientHeight) return
   mobileViewport.value = isMobileViewport(clientWidth)
+  pageContentCanvas?.setMobileReading(mobileViewport.value)
   if (debugGui) debugGui.domElement.style.display = mobileViewport.value ? 'none' : ''
 
   const reading = loginSucceeded.value && !cinematicActive.value && !applicationStageActive.value
@@ -2189,25 +2193,6 @@ function handlePaperWheel(event: WheelEvent) {
 }
 
 function handlePaperPointerMove(event: PointerEvent) {
-  if (paperPointers.has(event.pointerId)) {
-    paperPointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
-    if (paperPinch && paperPointers.size === 2) {
-      const [a, b] = [...paperPointers.values()] as [{x:number;y:number}, {x:number;y:number}]
-      paperZoom.value = THREE.MathUtils.clamp(paperPinch.zoom * Math.hypot(a.x - b.x, a.y - b.y) / paperPinch.distance, 1, 2.4)
-      const maxPan = (paperZoom.value - 1) * Math.min(viewport.value?.clientWidth ?? 390, paperScreenHeight) / 2
-      paperPan.x = THREE.MathUtils.clamp(paperPinch.panX + (a.x + b.x) / 2 - paperPinch.x, -maxPan, maxPan)
-      paperPan.y = THREE.MathUtils.clamp(paperPinch.panY + (a.y + b.y) / 2 - paperPinch.y, -maxPan, maxPan)
-      suppressPaperClickUntil = performance.now() + 400
-      return
-    }
-  }
-  if (paperTouch?.id === event.pointerId) {
-    const delta = event.clientY - paperTouch.y
-    if (Math.abs(event.clientY - paperTouch.startY) > 5) paperTouch.moved = true
-    if (paperTouch.moved) pageContentCanvas?.scrollBy(-delta * 1400 / Math.max(paperScreenHeight, 1))
-    paperTouch.y = event.clientY
-    return
-  }
   if (!renderer || !pageContentCanvas) return
   if (isPointerOverSubmissionEnvelope(event.clientX, event.clientY)) {
     pageContentCanvas.pointerLeave()
@@ -2276,12 +2261,12 @@ function startNewKeyApplication() {
 }
 
 function handlePaperClick(event: PointerEvent) {
-  if (performance.now() < suppressPaperClickUntil) return
   if (desk.value || applicationGuideOpen.value) return
   if (isPointerOverSubmissionEnvelope(event.clientX, event.clientY)) {
     openSubmissionFilePicker()
     return
   }
+  if (mobileViewport.value) return
   if (!pageContentCanvas || cinematicActive.value || applicationStageActive.value) return
   const pointer = getPaperPointerPosition(event.clientX, event.clientY)
   if (!pointer) return
@@ -2300,44 +2285,8 @@ function handlePaperClick(event: PointerEvent) {
   startNewVenueApplication(target.venueName)
 }
 
-let paperTouch: { id: number; y: number; startY: number; moved: boolean } | null = null
-let suppressPaperClickUntil = 0
-let paperScreenHeight = 500
-const paperZoom = ref(1)
-const paperPan = { x: 0, y: 0 }
-const paperPointers = new Map<number, { x: number; y: number }>()
-let paperPinch: { distance: number; zoom: number; x: number; y: number; panX: number; panY: number } | null = null
-function resetPaperZoom() {
-  paperZoom.value = 1
-  paperPan.x = paperPan.y = 0
-}
-function beginPaperTouch(event: PointerEvent) {
-  if (event.pointerType === 'mouse' || !mobileViewport.value || cinematicActive.value || applicationStageActive.value) return
-  if (!paperPointers.size && !isPointerOverPaper(event.clientX, event.clientY)) return
-  paperPointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
-  if (paperPointers.size === 2) {
-    const [a, b] = [...paperPointers.values()] as [{x:number;y:number}, {x:number;y:number}]
-    paperPinch = { distance: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)), zoom: paperZoom.value, x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, panX: paperPan.x, panY: paperPan.y }
-    paperTouch = null
-    renderer?.domElement.setPointerCapture(event.pointerId)
-    return
-  }
-  paperTouch = { id: event.pointerId, y: event.clientY, startY: event.clientY, moved: false }
-  renderer?.domElement.setPointerCapture(event.pointerId)
-}
-function endPaperTouch(event: PointerEvent) {
-  paperPointers.delete(event.pointerId)
-  if (paperPinch) {
-    paperPinch = null
-    suppressPaperClickUntil = performance.now() + 400
-  }
-  if (paperTouch?.id !== event.pointerId) return
-  if (paperTouch.moved) suppressPaperClickUntil = performance.now() + 400
-  paperTouch = null
-}
-
 // Change framing, not the authored world-space camera or prop keyframes.
-// The exact same paper texture and paper-edge DOM tabs are used on all devices.
+// Mobile lays out native readable ink within the projected paper bounds.
 let mobileProjectionApplied = false
 function frameMobilePaper() {
   if (!camera) return
@@ -2354,7 +2303,7 @@ function frameMobilePaper() {
   const { clientWidth: width, clientHeight: height } = viewport.value
   const frame = mobilePaperFraming(width, height, {
     minX: bounds.min.x, maxX: bounds.max.x, minY: bounds.min.y, maxY: bounds.max.y,
-  }, paperZoom.value, paperPan)
+  })
   const matrix = camera.projectionMatrix.elements
   matrix[0] *= frame.scale
   matrix[5] *= frame.scale
@@ -2362,7 +2311,6 @@ function frameMobilePaper() {
   matrix[9] = frame.offsetY
   camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert()
   mobileProjectionApplied = true
-  paperScreenHeight = frame.paperHeight
 }
 
 function cachePaperFacePoints(paper: THREE.Mesh) {
@@ -2428,14 +2376,14 @@ function updateVenueSelectorPosition() {
   const currentKeyApplicationTab = keyApplicationTab.value
     ?? pageRoot?.querySelector<HTMLButtonElement>('.key-application-edge-tab')
     ?? null
-  const positioningLayer = currentVenueSelector ?? currentApplicationTab?.parentElement
+  const positioningLayer = (mobileViewport.value ? pageRoot : currentVenueSelector) ?? currentApplicationTab?.parentElement
     ?? currentKeyApplicationTab?.parentElement
   if (
     !positioningLayer
     || !paperSurfaceMesh
     || !renderer
     || !camera
-    || (!venueSelectorReady.value && !currentApplicationTab && !currentKeyApplicationTab)
+    || (!mobileViewport.value && !venueSelectorReady.value && !currentApplicationTab && !currentKeyApplicationTab)
   ) return
 
   const selectorBounds = positioningLayer.getBoundingClientRect()
@@ -2473,6 +2421,8 @@ function updateVenueSelectorPosition() {
 
   // The broad front plane supplies the precise left/right paper edges. Keep
   // the full geometry height for the deliberately irregular top and bottom.
+  const paperFaceTop = minY
+  const paperFaceBottom = maxY
   for (const x of [paperBounds.min.x, paperBounds.max.x]) {
     for (const y of [paperBounds.min.y, paperBounds.max.y]) {
       projectedCorner
@@ -2488,6 +2438,12 @@ function updateVenueSelectorPosition() {
   }
 
   if (![minX, maxX, minY, maxY].every(Number.isFinite)) return
+
+  if (mobileViewport.value) {
+    const bounds = mobileReaderBounds(minX, paperFaceTop, maxX, paperFaceBottom, rendererBounds.height)
+    const style = `left:${bounds.left}px;top:${bounds.top}px;width:${bounds.width}px;height:${bounds.height}px`
+    if (mobilePaperStyle.value !== style) mobilePaperStyle.value = style
+  }
 
   const paperHeight = maxY - minY
   const leftSlots = [0.14, 0.31, 0.47, 0.64, 0.83]
@@ -2683,9 +2639,6 @@ onMounted(() => {
     passive: false,
   })
   renderer.domElement.addEventListener('pointermove', handlePaperPointerMove, { passive: true })
-  renderer.domElement.addEventListener('pointerdown', beginPaperTouch)
-  renderer.domElement.addEventListener('pointerup', endPaperTouch)
-  renderer.domElement.addEventListener('pointercancel', endPaperTouch)
   renderer.domElement.addEventListener('pointerleave', handlePaperPointerLeave)
   renderer.domElement.addEventListener('click', handlePaperClick)
   renderer.domElement.addEventListener('dragover', handleSubmissionDragOver)
@@ -2756,6 +2709,7 @@ onMounted(() => {
         renderer?.capabilities.getMaxAnisotropy() ?? 1,
         paperTextureScale(window.devicePixelRatio, renderer?.capabilities.maxTextureSize ?? 4096),
       )
+      pageContentCanvas.setMobileReading(mobileViewport.value)
       const leafyTreeParts: THREE.Mesh[] = []
 
       houseModel.traverse((child) => {
@@ -2871,9 +2825,6 @@ onBeforeUnmount(() => {
   debugGui?.destroy()
   renderer?.domElement.removeEventListener('wheel', handlePaperWheel, true)
   renderer?.domElement.removeEventListener('pointermove', handlePaperPointerMove)
-  renderer?.domElement.removeEventListener('pointerdown', beginPaperTouch)
-  renderer?.domElement.removeEventListener('pointerup', endPaperTouch)
-  renderer?.domElement.removeEventListener('pointercancel', endPaperTouch)
   renderer?.domElement.removeEventListener('pointerleave', handlePaperPointerLeave)
   renderer?.domElement.removeEventListener('click', handlePaperClick)
   renderer?.domElement.removeEventListener('dragover', handleSubmissionDragOver)
@@ -3465,10 +3416,15 @@ onBeforeUnmount(() => {
       <button @click="logoutPortal">退出</button>
     </nav>
     <button v-if="applicationStageActive && !cinematicActive" class="submission-help-tab" @pointerdown.stop @click.stop="applicationGuideOpen = true">使用指南 · 示例</button>
-    <aside v-if="mobileViewport && loginSucceeded && !cinematicActive && !applicationStageActive" class="paper-touch-hint">
-      <button v-if="paperZoom > 1.01" @click="resetPaperZoom">还原纸页 ↙</button>
-      <span v-else>双指缩放纸页 · 单指滑动内容</span>
-    </aside>
+    <MobileFolderReader
+      v-if="mobileViewport && loginSucceeded && !cinematicActive && !applicationStageActive"
+      :style="mobilePaperStyle"
+      :page="folderPage" :personal="personalHomeBoard" :calendar="venueUsageBoard" :selected-venue-id="selectedVenueId"
+      @switch="switchFolderPage" @venue="selectUsageVenue"
+      @detail="desk = { mode: 'personal', applicationId: $event.id }"
+      @apply="startNewVenueApplication" @key-apply="startNewKeyApplication"
+      @retry="loadPersonalHome(); loadVenueUsageBoard()"
+    />
     <Transition name="dossier-fade">
       <ApplicationGuide v-if="applicationGuideOpen" @close="applicationGuideOpen = false" />
     </Transition>

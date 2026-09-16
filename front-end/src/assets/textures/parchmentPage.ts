@@ -61,6 +61,7 @@ export type ParchmentPageAction =
 
 export interface ParchmentPageCanvas {
   texture: THREE.CanvasTexture
+  setMobileReading: (enabled: boolean) => void
   updateUsageBoard: (board: VenueUsageBoard) => void
   transitionUsageBoard: (board: VenueUsageBoard) => void
   selectVenue: (venueId: number) => void
@@ -873,7 +874,7 @@ function drawFolderPageTabs(ctx: CanvasRenderingContext2D, active: 'profile' | '
   }
 }
 
-const personalStatusStyles: Record<string, { label: string; color: string; text: string }> = {
+export const personalStatusStyles: Record<string, { label: string; color: string; text: string }> = {
   draft: { label: '草稿', color: '#8b8477', text: '#5f594f' },
   ai_reviewing: { label: 'AI审核中', color: '#77758a', text: '#535166' },
   ai_passed: { label: 'AI通过', color: '#5f7a70', text: '#3f5b52' },
@@ -1249,6 +1250,7 @@ export function createParchmentPageCanvas(maxAnisotropy: number, pixelScale = 1)
   let fadePhase: 'idle' | 'out' | 'in' = 'idle'
   let fadeOpacity = 1
   let lastTickAt = performance.now()
+  let mobileReading = false
 
   const texture = new THREE.CanvasTexture(canvas)
   texture.name = 'Parchment_Venue_Usage_Board'
@@ -1258,6 +1260,13 @@ export function createParchmentPageCanvas(maxAnisotropy: number, pixelScale = 1)
   texture.magFilter = THREE.LinearFilter
 
   const render = () => {
+    // Mobile uses readable, scrollable DOM ink over the same 3D paper.
+    // Clear only the ink texture, not the original parchment material.
+    if (mobileReading) {
+      context.clearRect(0, 0, PAGE_WIDTH, PAGE_HEIGHT)
+      texture.needsUpdate = true
+      return
+    }
     drawParchment(
       context,
       board,
@@ -1490,6 +1499,11 @@ export function createParchmentPageCanvas(maxAnisotropy: number, pixelScale = 1)
   render()
   return {
     texture,
+    setMobileReading(enabled) {
+      if (mobileReading === enabled) return
+      mobileReading = enabled
+      render()
+    },
     updateUsageBoard,
     transitionUsageBoard,
     selectVenue,

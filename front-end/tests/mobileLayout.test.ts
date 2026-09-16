@@ -5,6 +5,7 @@ import {
   isMobileViewport,
   mobileEnvelopeLayout,
   mobilePaperFraming,
+  mobileReaderBounds,
 } from '../src/features/forest-portal/mobileLayout.ts'
 
 test('mobile layout includes landscape phones and preserves desktop above 1024px', () => {
@@ -13,7 +14,7 @@ test('mobile layout includes landscape phones and preserves desktop above 1024px
   assert(isMobileViewport(1024))
   assert(!isMobileViewport(1025))
 })
-test('paper framing keeps the sheet centered with room for both bookmark rails', () => {
+test('mobile paper uses the available width instead of shrinking for bookmark rails', () => {
   const bounds = { minX: 0.4, maxX: 2, minY: -1.2, maxY: 1.4 }
   for (const [width, height] of [
     [320, 568],
@@ -23,13 +24,27 @@ test('paper framing keeps the sheet centered with room for both bookmark rails',
     const frame = mobilePaperFraming(width!, height!, bounds)
     const left = ((bounds.minX * frame.scale - frame.offsetX + 1) * width!) / 2
     const right = ((bounds.maxX * frame.scale - frame.offsetX + 1) * width!) / 2
-    assert(left >= Math.min(76, width! * 0.19) - 0.001)
-    assert(right <= width! - Math.min(76, width! * 0.19) + 0.001)
+    assert(left >= 18 - 0.001)
+    assert(right <= width! - 18 + 0.001)
+    assert(Math.abs(right - left - Math.min(width! - 36, 600)) < 0.001)
     assert(Math.abs((left + right) / 2 - width! / 2) < 0.001)
-    assert(frame.paperHeight <= height! - 120 + 0.001)
+    const top = (1 - (bounds.maxY * frame.scale - frame.offsetY)) * height! / 2
+    assert(top >= 76 - 0.001)
     const zoomed = mobilePaperFraming(width!, height!, bounds, 2, { x: 12, y: 20 })
     assert.equal(zoomed.scale, frame.scale * 2)
     assert(Math.abs(zoomed.offsetX - (frame.offsetX * 2 - 24 / width!)) < 0.001)
+  }
+})
+test('native mobile reader stays within paper sides and visible viewport, including landscape', () => {
+  for (const [width, height, paperBottom] of [[320, 568, 500], [390, 844, 690], [844, 390, 970]]) {
+    const bounds = mobileReaderBounds(18, 76, width! - 18, paperBottom!, height!)
+    assert(bounds.left > 18)
+    assert(bounds.width > 240)
+    assert(bounds.left + bounds.width < width! - 18)
+    assert(bounds.top >= 106)
+    assert(bounds.height > 150)
+    assert(bounds.top + bounds.height <= height! - 19)
+    assert(bounds.top + bounds.height <= paperBottom! - 19)
   }
 })
 test('calendar spans month boundaries and includes both endpoints', () => {
