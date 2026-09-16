@@ -11,6 +11,7 @@ class Application(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    secondary_reviewer_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), index=True)
     application_type: Mapped[str] = mapped_column(String(64), index=True)
     organization: Mapped[str | None] = mapped_column(String(255))
     borrow_organization: Mapped[str | None] = mapped_column(String(255))

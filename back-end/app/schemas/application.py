@@ -53,6 +53,7 @@ class ApplicationPreReviewResponse(BaseModel):
 class ApplicationRead(BaseModel):
     id: int
     user_id: int
+    secondary_reviewer_id: int | None = None
     application_type: str
     organization: str | None
     borrow_organization: str | None
@@ -154,3 +155,8 @@ class AdminPreReviewDecision(BaseModel):
     venue_id: int | None = None
     borrow_organization: str | None = Field(default=None, max_length=255)
     time_slots: list[ManualTimeSlot] = Field(default_factory=list, max_length=20)
+
+
+class SecondaryReviewDecision(BaseModel):
+    passed: bool
+    reason: str | None = Field(default=None, max_length=1000)

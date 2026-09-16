@@ -53,5 +53,5 @@ class AuthResponse(TokenPair):
 
 
 class UserUpdateRequest(BaseModel):
-    role: str | None = Field(default=None, pattern="^(user|admin)$")
+    role: str | None = Field(default=None, pattern="^(user|admin|secondary_admin)$")
     is_application_allowed: bool | None = None

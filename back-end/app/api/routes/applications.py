@@ -34,6 +34,7 @@ from app.core.config import settings
 from app.services.ai_review import ai_review_service
 from app.services.file_storage import file_storage_service
 from app.services.notification import notification_service
+from app.services.secondary_review import can_read_assigned, queue_signed_review
 
 router = APIRouter(prefix="/applications", tags=["applications"])
 
@@ -290,7 +291,7 @@ async def get_owned_application_or_admin(
     application = await db.get(Application, application_id)
     if application is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
-    if application.user_id != current_user.id and current_user.role != "admin":
+    if application.user_id != current_user.id and current_user.role != "admin" and not can_read_assigned(application, current_user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied")
     return application
 
@@ -444,17 +445,7 @@ async def upload_application_file(
     uploaded = await save_application_file(db, application_id, file_type, file)
     application.requested_file_types = []
     application.decision_reason = None
-    application.status = "pending_admin_submit"
-    await notification_service.notify_admins(
-        db=db,
-        application=application,
-        notification_type="pending_admin_submit",
-        subject="有申请材料待管理员提交",
-        body=(
-            "用户已补交申请材料，申请进入待管理员提交状态。\n\n"
-            f"{format_application_label(application)}"
-        ),
-    )
+    await queue_signed_review(db, application)
     await db.commit()
     return GenericFileUploadResponse(
         application_id=application.id,
@@ -497,18 +488,7 @@ async def upload_application_files_batch(
                       for kind, file in zip(types, files)]
     application.requested_file_types = []
     application.decision_reason = None
-    application.status = "pending_admin_submit"
-    await notification_service.notify_admins(
-        db=db,
-        application=application,
-        notification_type="pending_admin_submit",
-        subject="有申请材料待管理员提交",
-        body=(
-            f"用户已批量补交 {len(uploaded_files)} 份申请材料，"
-            "申请进入待管理员提交状态。\n\n"
-            f"{format_application_label(application)}"
-        ),
-    )
+    await queue_signed_review(db, application)
     await db.commit()
     return GenericFilesUploadResponse(
         application_id=application.id,
@@ -597,17 +577,7 @@ async def submit_signed_files(
             detail="This application type does not support signed file submission",
         )
 
-    application.status = "pending_admin_submit"
-    await notification_service.notify_admins(
-        db=db,
-        application=application,
-        notification_type="pending_admin_submit",
-        subject="有申请材料待管理员提交",
-        body=(
-            "用户已上传签字盖章材料，申请进入待管理员提交状态。\n\n"
-            f"{format_application_label(application)}"
-        ),
-    )
+    await queue_signed_review(db, application)
     await db.commit()
 
     return SignedFilesSubmitResponse(

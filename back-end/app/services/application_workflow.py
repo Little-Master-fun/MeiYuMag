@@ -9,6 +9,7 @@ FILE_LABELS = {
     "pre_review_word": "初审申请文件",
     "supporting_material": "证明或说明材料",
     "meiyu_signed_application_form": "签字盖章申请表",
+    "meiyu_countersigned_scan": "二次签字盖章扫描件",
     "yueyuan_plan_file": "活动策划书",
     "yueyuan_plan_signed_scan": "活动策划书签章扫描件",
     "safety_responsibility_file": "安全责任书",
@@ -57,6 +58,8 @@ async def validate_supplement_types(db: AsyncSession, application: Application, 
 
 
 TRANSITIONS = {
+    "pending_secondary_review": {"cancelled", "rejected"},
+    "pending_secondary_signature": {"cancelled", "rejected"},
     "pending_admin_submit": {"submitted", "rejected", "cancelled"},
     "submitted": {"completed", "cancelled"},
     "pending_signed_files": {"cancelled"},

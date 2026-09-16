@@ -94,6 +94,7 @@ import {
 } from '@/features/forest-portal/submission'
 import WorkflowDesk from './components/WorkflowDesk.vue'
 import ApplicationGuide from './components/ApplicationGuide.vue'
+import InkSceneLoader from './components/InkSceneLoader.vue'
 import { isMobileViewport, mobileEnvelopeLayout, mobilePaperFraming } from './mobileLayout'
 import { paperTextureScale, scenePixelRatio } from './renderQuality'
 import { applicationDownloadRequirements, downloadRequirement, materialType } from './materialLibrary'
@@ -103,7 +104,7 @@ import { useRoute, useRouter } from 'vue-router'
 const route = useRoute()
 const router = useRouter()
 
-const desk = ref<{ mode: 'personal' | 'admin' | 'new'; applicationId?: number; initialVenueId?: number; initialDate?: string } | null>(null)
+const desk = ref<{ mode: 'personal' | 'admin' | 'secondary' | 'new'; applicationId?: number; initialVenueId?: number; initialDate?: string } | null>(null)
 const applicationGuideOpen = ref(false)
 const downloadingRequirement = ref('')
 const materialDownloadMessage = ref('')
@@ -161,6 +162,31 @@ const submissionBubbleStyle = ref<CSSProperties>({ visibility: 'hidden' })
 const loadingProgress = ref(0)
 const loadError = ref('')
 const modelReady = ref(false)
+const sceneAssembled = ref(false)
+const sceneEntrancePrepared = ref(false)
+
+function prepareSceneReveal() {
+  if (sceneEntrancePrepared.value || !sceneAssembled.value || !model || !houseModel || !renderer || !scene || !camera) return
+  try {
+    startCameraEntrance(model, houseModel)
+    // Set both framing and scale while the loading paper is still opaque.
+    applyHouseTransform()
+    renderer.shadowMap.needsUpdate = true
+    // Do not depend on the throttled scene loop: the backing canvas must
+    // already contain the actual entrance frame when the paper fades out.
+    renderer.render(scene, camera)
+    sceneEntrancePrepared.value = true
+  } catch (error) {
+    console.error('Failed to prepare scene entrance', error)
+    loadError.value = '场景入场画面准备失败，请重新展开。'
+  }
+}
+
+function finishSceneReveal() {
+  if (!sceneEntrancePrepared.value || modelReady.value || loadError.value) return
+  modelReady.value = true
+  void restorePortalSession()
+}
 const cinematicActive = ref(false)
 const pageTurnAvailable = ref(false)
 const pageTurning = ref(false)
@@ -2626,7 +2652,12 @@ onMounted(() => {
   camera = new THREE.PerspectiveCamera(42, 1, 0.1, 1000)
   camera.position.set(4, 3, 6)
 
-  renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'default' })
+  try {
+    renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'default' })
+  } catch {
+    loadError.value = '暂时无法展开 3D 场景，请检查浏览器的 WebGL 支持后重试。'
+    return
+  }
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_PIXEL_RATIO))
   renderer.outputColorSpace = THREE.SRGBColorSpace
   renderer.toneMapping = THREE.ACESFilmicToneMapping
@@ -2680,22 +2711,28 @@ onMounted(() => {
   scene.add(fillLight)
 
   const loadingManager = new THREE.LoadingManager()
-  loadingManager.onProgress = (_url, loaded, total) => {
-    loadingProgress.value = Math.round((loaded / total) * 100)
-  }
   const loader = new GLTFLoader(loadingManager)
   const houseUrl = `${import.meta.env.BASE_URL}models/forest_house.glb`
   const clipboardUrl = `${import.meta.env.BASE_URL}models/downloaded_clipboard.glb`
   const mailboxUrl = `${import.meta.env.BASE_URL}models/mailbox.glb`
   const submissionSignUrl = `${import.meta.env.BASE_URL}models/hanging-wooden-sign-themed.glb`
 
+  const assetProgress = [0, 0, 0, 0]
+  const recordAssetProgress = (index: number, fraction: number) => {
+    assetProgress[index] = Math.max(assetProgress[index] ?? 0, fraction)
+    loadingProgress.value = Math.max(loadingProgress.value, assetProgress.reduce((a, b) => a + b, 0) * 23)
+  }
+  const loadSceneAsset = (url: string, index: number) => loader.loadAsync(url, (event) => {
+    if (event.total > 0) recordAssetProgress(index, Math.min(.9, event.loaded / event.total * .9))
+  }).then((asset) => { recordAssetProgress(index, 1); return asset })
+
   Promise.all([
-    loader.loadAsync(houseUrl),
-    loader.loadAsync(clipboardUrl),
-    loader.loadAsync(mailboxUrl),
-    loader.loadAsync(submissionSignUrl),
+    loadSceneAsset(houseUrl, 0),
+    loadSceneAsset(clipboardUrl, 1),
+    loadSceneAsset(mailboxUrl, 2),
+    loadSceneAsset(submissionSignUrl, 3),
   ])
-    .then(([houseGltf, clipboardGltf, mailboxGltf, submissionSignGltf]) => {
+    .then(async ([houseGltf, clipboardGltf, mailboxGltf, submissionSignGltf]) => {
       if (!scene || !camera) return
 
       model = new THREE.Group()
@@ -2795,13 +2832,12 @@ onMounted(() => {
 
       scene.add(model)
       if (renderer) renderer.shadowMap.needsUpdate = true
-      startCameraEntrance(model, houseModel)
-      // Match live GUI editing: establish the house-based camera composition at
-      // its authored size first, then apply the saved visual scale.
-      applyHouseTransform()
+      loadingProgress.value = 96
+      // Compile while the paper still covers the scene, not on its first visible frame.
+      if (renderer) await renderer.compileAsync(scene, camera)
+      if (!renderer || !scene || !camera) return
       loadingProgress.value = 100
-      modelReady.value = true
-      void restorePortalSession()
+      sceneAssembled.value = true
     })
     .catch((error) => {
       console.error('Failed to load GLB models', error)
@@ -3113,14 +3149,7 @@ onBeforeUnmount(() => {
       </aside>
     </Transition>
 
-    <div v-if="!modelReady && !loadError" class="loading-panel">
-      <div class="loading-track">
-        <span :style="{ width: `${loadingProgress}%` }" />
-      </div>
-      <p>正在加载小屋、文件夹与信箱模型 {{ loadingProgress }}%</p>
-    </div>
-
-    <div v-if="loadError" class="error-panel">{{ loadError }}</div>
+    <InkSceneLoader v-if="!modelReady" :progress="loadingProgress" :ready="sceneAssembled" :error="loadError" @before-reveal="prepareSceneReveal" @complete="finishSceneReveal" />
 
     <Transition name="login-card">
       <section
@@ -3432,6 +3461,7 @@ onBeforeUnmount(() => {
       <button @click="applicationGuideOpen = true">使用指南</button>
       <button @click="desk = { mode: 'personal' }">申请档案</button>
       <button v-if="auth.isAdmin" @click="desk = { mode: 'admin' }">审核台</button>
+      <button v-if="auth.isSecondaryAdmin" @click="desk = { mode: 'secondary' }">签章工作台</button>
       <button @click="logoutPortal">退出</button>
     </nav>
     <button v-if="applicationStageActive && !cinematicActive" class="submission-help-tab" @pointerdown.stop @click.stop="applicationGuideOpen = true">使用指南 · 示例</button>
@@ -4320,47 +4350,6 @@ onBeforeUnmount(() => {
     height: 39px;
   }
 
-}
-
-.loading-panel,
-.error-panel {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: min(320px, calc(100vw - 48px));
-  padding: 20px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 14px;
-  background: rgba(7, 17, 13, 0.78);
-  color: rgba(238, 255, 247, 0.82);
-  text-align: center;
-  backdrop-filter: blur(16px);
-  transform: translate(-50%, -50%);
-}
-
-.loading-panel p {
-  margin: 12px 0 0;
-  font-size: 13px;
-}
-
-.loading-track {
-  height: 5px;
-  overflow: hidden;
-  border-radius: 99px;
-  background: rgba(255, 255, 255, 0.1);
-}
-
-.loading-track span {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: linear-gradient(90deg, #3dd9ac, #f7ca75);
-  transition: width 180ms ease;
-}
-
-.error-panel {
-  border-color: rgba(248, 113, 113, 0.35);
-  color: #fecaca;
 }
 
 .login-card {

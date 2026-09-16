@@ -14,9 +14,10 @@ import {
 } from '../workflow'
 import { getSubmissionErrorMessage } from '../submission'
 import { getLocalDateKey, offsetDate } from '../utils'
+import UserManagementPanel from './UserManagementPanel.vue'
 
 const props = defineProps<{
-  mode: 'personal' | 'admin' | 'new'
+  mode: 'personal' | 'admin' | 'secondary' | 'new'
   applicationId?: number
   initialVenueId?: number
   initialDate?: string
@@ -53,6 +54,10 @@ const reviewSlots = () => {
 }
 const templates = ref<Array<{ name: string; application_type: string; download_url: string }>>([])
 const admin = computed(() => props.mode === 'admin' && auth.isAdmin)
+const secondary = computed(() => props.mode === 'secondary' && auth.isSecondaryAdmin)
+const section = ref<'applications' | 'users'>('applications')
+const countersignedFile = ref<File | null>(null)
+const countersignInput = ref<HTMLInputElement | null>(null)
 const visibleApplications = computed(() =>
   applications.value.filter((a) => !filter.value || a.status === filter.value),
 )
@@ -64,11 +69,13 @@ const stamp = (s: string) => labels[s] || s
 const canContinue = computed(
   () =>
     !admin.value &&
+    !secondary.value &&
     selected.value &&
     ['ai_rejected', 'pending_signed_files', 'supplement_required'].includes(selected.value.status),
 )
 const canCancel = computed(
   () =>
+    !secondary.value &&
     selected.value &&
     !['completed', 'cancelled', 'rejected'].includes(selected.value.status) &&
     (!selected.value.start_at || new Date(selected.value.start_at) > new Date()),
@@ -104,6 +111,8 @@ async function openApplication(id: number) {
     if (version !== requestVersion) return
     selected.value = detail.data
     files.value = material.data
+    countersignedFile.value = null
+    if (countersignInput.value) countersignInput.value.value = ''
     reason.value = ''
     requested.value = []
     manualVenueId.value = detail.data.venue_id ?? 0
@@ -121,6 +130,7 @@ async function load() {
   error.value = ''
   try {
     if (props.mode === 'admin' && !auth.isAdmin) throw new Error('仅管理员可打开审核台')
+    if (props.mode === 'secondary' && !auth.isSecondaryAdmin) throw new Error('仅二级管理员可打开签章工作台')
     const [venueData, templateData] = await Promise.all([
       axios.get('/api/v1/venues'),
       axios.get('/api/v1/templates'),
@@ -130,7 +140,7 @@ async function load() {
     if (!venueId.value) venueId.value = venues.value[0]?.id ?? 0
     if (props.mode !== 'new') {
       applications.value = (
-        await axios.get(admin.value ? '/api/v1/admin/applications' : '/api/v1/applications')
+        await axios.get(admin.value ? '/api/v1/admin/applications' : secondary.value ? '/api/v1/secondary/applications' : '/api/v1/applications')
       ).data
       if (props.applicationId) await openApplication(props.applicationId)
     }
@@ -139,6 +149,37 @@ async function load() {
   } finally {
     loading.value = false
   }
+}
+function selectCountersign(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  countersignedFile.value = null
+  if (!file) return
+  if (!/\.(pdf|png|jpe?g)$/i.test(file.name) || !file.size || file.size > 30 * 1024 * 1024) {
+    error.value = '请选择不超过 30 MB 的 PDF、PNG 或 JPG 扫描件，文件不能为空'
+    input.value = ''; return
+  }
+  error.value = ''; countersignedFile.value = file
+}
+async function secondaryAction(action: 'pass' | 'return' | 'upload') {
+  if (!secondary.value || !selected.value || busy.value) return
+  if (action === 'return' && !reason.value.trim()) { error.value = '请写明需要修正的原因'; return }
+  if (action === 'upload' && !countersignedFile.value) { error.value = '请先选择再次签字盖章后的扫描件'; return }
+  const id = selected.value.id
+  busy.value = true; error.value = ''; notice.value = ''
+  try {
+    if (action === 'upload') {
+      const body = new FormData(); body.append('file', countersignedFile.value!)
+      await axios.post(`/api/v1/secondary/applications/${id}/countersigned-file`, body)
+    } else {
+      await axios.post(`/api/v1/secondary/applications/${id}/decision`, { passed: action === 'pass', reason: reason.value.trim() || undefined })
+    }
+    await openApplication(id)
+    applications.value = applications.value.map(item => item.id === id ? selected.value! : item)
+    notice.value = action === 'upload' ? '再次签章材料已交给一级管理员，请等待最终审核。' : action === 'pass' ? '审核已通过，请完成再次签字盖章后上传扫描件。' : '已退回申请人修正。'
+    emit('refresh')
+  } catch (e) { error.value = getSubmissionErrorMessage(e) }
+  finally { busy.value = false }
 }
 async function act(
   action: 'cancel' | 'submitted' | 'completed' | 'rejected' | 'supplement' | 'legacy-reject' | 'manual-pass',
@@ -265,13 +306,19 @@ onBeforeUnmount(() => {
     >
       <header class="dossier-header">
         <div>
-          <small>MEIYU · {{ admin ? 'REVIEW DESK' : 'APPLICATION ARCHIVE' }}</small>
+          <small>MEIYU · {{ admin || secondary ? 'REVIEW DESK' : 'APPLICATION ARCHIVE' }}</small>
           <h2 id="desk-title">
-            {{ props.mode === 'new' ? '寄出一份申请' : admin ? '申请审核台' : '我的申请档案' }}
+            {{ props.mode === 'new' ? '寄出一份申请' : admin ? '申请审核台' : secondary ? '签章工作台' : '我的申请档案' }}
           </h2>
         </div>
         <button class="close-leaf" :disabled="busy" @click="close" aria-label="收起档案">×</button>
       </header>
+      <nav v-if="admin" class="kind-tabs" aria-label="管理章节">
+        <button :aria-pressed="section === 'applications'" :disabled="busy" @click="section = 'applications'">申请审核</button>
+        <button :aria-pressed="section === 'users'" :disabled="busy" @click="section = 'users'">用户管理</button>
+      </nav>
+      <UserManagementPanel v-if="admin && section === 'users'" />
+      <template v-else>
       <p v-if="error" class="ink-note error" role="alert">
         {{ error }} <button v-if="loading === false && !selected" @click="load">重试</button>
       </p>
@@ -322,6 +369,8 @@ onBeforeUnmount(() => {
       </template>
       <template v-else>
         <div v-if="!selected" class="archive-list">
+          <p v-if="secondary" class="ink-note">仅显示指派给你的美育场地签章申请。先下载核对用户材料，审核通过后完成再次签字盖章，再上传扫描件交一级管理员确认。</p>
+          <button v-if="admin || secondary" class="text-link" :disabled="busy || loading" @click="load">刷新待办 ↻</button>
           <label class="filter-note"
             >筛选签条
             <select v-model="filter">
@@ -411,6 +460,24 @@ onBeforeUnmount(() => {
               ↓ 下载
             </button>
           </article>
+          <div v-if="secondary && ['pending_secondary_review', 'pending_secondary_signature'].includes(selected.status)" class="review-letter">
+            <template v-if="selected.status === 'pending_secondary_review'">
+              <h4>核对用户签章材料</h4>
+              <p>请下载并核对申请信息、签字和盖章。通过后还需完成再次签章并提交扫描件。</p>
+              <textarea v-model="reason" :disabled="busy" maxlength="1000" rows="3" aria-label="签章审核原因" placeholder="需要修正时，请写明原因，申请人会看到此说明。" />
+              <div class="review-actions"><button :disabled="busy" @click="secondaryAction('return')">退回修正</button><button class="seal-action" :disabled="busy" @click="secondaryAction('pass')">审核通过 · 准备再次签章</button></div>
+            </template>
+            <template v-else>
+              <h4>递交再次签章扫描件</h4>
+              <p>完成再次签字盖章后，提交清晰完整的扫描件，不接受普通拍照照片。支持 PDF、PNG、JPG，单份不超过 30 MB。</p>
+              <input ref="countersignInput" class="scan-file-input" type="file" accept=".pdf,.png,.jpg,.jpeg" aria-label="再次签章扫描件" :disabled="busy" @change="selectCountersign" />
+              <button class="text-link" :disabled="busy" @click="countersignInput?.click()">＋ {{ countersignedFile ? '换一份扫描件' : '放入再次签章扫描件' }}</button>
+              <p v-if="countersignedFile">待递交：{{ countersignedFile.name }}</p>
+              <button class="seal-action" :disabled="busy || !countersignedFile" @click="secondaryAction('upload')">{{ busy ? '正在递交…' : '确认递交给一级管理员 ↗' }}</button>
+            </template>
+          </div>
+          <p v-else-if="secondary" class="ink-note">{{ selected.status === 'pending_admin_submit' ? '再次签章材料已递交，等待一级管理员最终审核。' : '当前无需你操作，可刷新待办查看最新进度。' }}</p>
+          <p v-if="admin && ['pending_secondary_review', 'pending_secondary_signature'].includes(selected.status)" class="ink-note">此申请正在二级管理员签章环节，完成再次签章后会回到本审核台。需要交接时，可在用户管理中调整二级管理员身份。</p>
           <div
             v-if="
               admin &&
@@ -501,11 +568,13 @@ onBeforeUnmount(() => {
           </footer>
         </div>
       </template>
+      </template>
     </section>
   </div>
 </template>
 
 <style scoped>
+.scan-file-input { display: none; }
 .desk-veil {
   position: fixed;
   inset: 0;

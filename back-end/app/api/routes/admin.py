@@ -25,6 +25,7 @@ from app.services.notification import notification_service
 from app.services.application_workflow import FILE_LABELS, TRANSITIONS, signed_file_types, latest_files
 from app.api.routes.applications import application_read_with_review_reason
 from app.services.manual_review import approve_manual_venue, confirm_key_details
+from app.services.secondary_review import COUNTERSIGN_FILE, reassign_pending_reviews
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -103,6 +104,8 @@ async def update_application_status(
     if payload.status in {"submitted", "completed"}:
         latest = await latest_files(db, application_id)
         required = signed_file_types(application.application_type)
+        if application.application_type == "meiyu_venue" and application.secondary_reviewer_id is not None:
+            required = [*required, COUNTERSIGN_FILE]
         if application.application_type == "key_borrow":
             required = ["key_borrow_application"]
         if any(key not in latest or latest[key].review_status in {"rejected", "failed"} for key in required):
@@ -301,7 +304,18 @@ async def update_user(
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     if payload.role is not None:
+        if user.role == "admin" and payload.role != "admin":
+            if user.id == current_admin.id:
+                raise HTTPException(409, "不能移除自己的一级管理员身份")
+            # Serialize primary-role changes so the last primary cannot disappear.
+            admins = (await db.execute(select(User).where(User.role == "admin").order_by(User.id).with_for_update())).scalars().all()
+            if len(admins) <= 1:
+                raise HTTPException(409, "至少保留一位一级管理员")
+        was_secondary = user.role == "secondary_admin"
         user.role = payload.role
+        await db.flush()
+        if was_secondary and user.role != "secondary_admin":
+            await reassign_pending_reviews(db, user.id)
     if payload.is_application_allowed is not None:
         user.is_application_allowed = payload.is_application_allowed
     await db.commit()

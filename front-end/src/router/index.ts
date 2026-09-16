@@ -7,6 +7,11 @@ const router = createRouter({
   routes: [
     { path: '/', redirect: '/login' },
     {
+      path: '/signatures',
+      component: () => import('@/views/SignatureDesk.vue'),
+      meta: { secondary: true },
+    },
+    {
       path: '/admin',
       alias: '/admin/applications',
       component: () => import('@/views/ReviewDesk.vue'),
@@ -31,10 +36,10 @@ const router = createRouter({
 })
 
 router.beforeEach(async to => {
-  if (!to.meta.admin) return true
+  if (!to.meta.admin && !to.meta.secondary) return true
   const auth = useAuthStore()
   if (!auth.user) await auth.fetchMe()
-  return auth.isAdmin ? true : '/login'
+  return (to.meta.secondary ? auth.isSecondaryAdmin : auth.isAdmin) ? true : '/login'
 })
 
 export default router

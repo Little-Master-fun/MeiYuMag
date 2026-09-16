@@ -23,6 +23,7 @@ Set local secrets in `.env`. The AI pre-review service uses an OpenAI-compatible
 AI_API_BASE_URL=https://llm.zerohyh.top/v1
 AI_API_KEY=your-api-key
 AI_MODEL=Ali-dashscope/MiniMax-M2.5
+AI_FALLBACK_MODELS=Ali-dashscope/Qwen3-Max,Ali-dashscope/Kimi-K2.5
 ```
 
 The base URL may include `/v1` or just the server root. The backend appends
@@ -135,6 +136,15 @@ SDU authentication is a profile binding flow for the currently logged-in user, s
 ```http
 Authorization: Bearer <access_token>
 ```
+
+Models are tried in order: `AI_MODEL`, then comma-separated `AI_FALLBACK_MODELS`
+(default: Qwen3-Max, Kimi-K2.5). Request/network/timeout/invalid-response failures
+advance to the next model; a valid rejection does not. Each model gets at most
+`AI_TIMEOUT_SECONDS` including its one JSON-format compatibility retry. All failures
+enter manual review and trigger the administrator notification. Set the fallback
+list to an empty string to disable it. Signed materials and keys never use this chain.
+Keep the reverse-proxy read timeout above the whole model chain plus notification
+processing; the supplied deployment allows 300 seconds for the default 3 × 60 seconds.
 
 Flow:
 

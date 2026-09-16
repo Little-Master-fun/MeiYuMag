@@ -4,7 +4,7 @@ proxy_set_header X-Real-IP $http_x_real_ip;
 proxy_set_header X-Forwarded-For $http_x_real_ip;
 proxy_set_header X-Forwarded-Proto https;
 proxy_connect_timeout 10s;
-proxy_read_timeout 180s;
+proxy_read_timeout 300s;
 proxy_send_timeout 180s;
 proxy_buffering off;
 add_header Cache-Control "no-store" always;

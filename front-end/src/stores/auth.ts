@@ -5,7 +5,7 @@ import axios from 'axios'
 export interface User {
   id: number
   email: string
-  role: 'user' | 'admin'
+  role: 'user' | 'admin' | 'secondary_admin'
   department: string | null
   is_sdu_verified: boolean
   is_application_allowed: boolean
@@ -50,6 +50,7 @@ export const useAuthStore = defineStore('auth', () => {
 
   const isLoggedIn = computed(() => Boolean(token.value && user.value))
   const isAdmin = computed(() => user.value?.role === 'admin')
+  const isSecondaryAdmin = computed(() => user.value?.role === 'secondary_admin')
 
   axios.interceptors.request.use((config) => {
     if (token.value) config.headers.Authorization = `Bearer ${token.value}`
@@ -213,6 +214,7 @@ export const useAuthStore = defineStore('auth', () => {
     error,
     isLoggedIn,
     isAdmin,
+    isSecondaryAdmin,
     login,
     register,
     requestRegistrationCaptcha,

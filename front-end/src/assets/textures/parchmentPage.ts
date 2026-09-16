@@ -25,7 +25,7 @@ export interface VenueUsageItem {
 export interface PersonalHomeProfile {
   email: string
   organization: string
-  role: 'user' | 'admin'
+  role: 'user' | 'admin' | 'secondary_admin'
   verified: boolean
   applicationAllowed: boolean
 }
@@ -884,6 +884,8 @@ const personalStatusStyles: Record<string, { label: string; color: string; text:
   pending_admin_pre_review: { label: '等待人工初审', color: '#737583', text: '#515361' },
   pending_admin: { label: '等待管理员', color: '#737583', text: '#515361' },
   pending_admin_submit: { label: '待管理员审核', color: '#60745f', text: '#394c3b' },
+  pending_secondary_review: { label: '待签章审核', color: '#60745f', text: '#394c3b' },
+  pending_secondary_signature: { label: '待再次签章', color: '#60745f', text: '#394c3b' },
   supplement_required: { label: '需要补交', color: '#9a6152', text: '#743f34' },
   admin_submitted: { label: '已提交', color: '#60745f', text: '#394c3b' },
   submitted: { label: '已审核确认', color: '#60745f', text: '#394c3b' },

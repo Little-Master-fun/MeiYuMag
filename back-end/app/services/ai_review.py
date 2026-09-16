@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import re
 from datetime import datetime
 from typing import Any
@@ -11,6 +12,8 @@ from fastapi import UploadFile
 from app.core.config import settings
 from app.schemas.application import AiPreReviewResult, ReviewIssue
 from app.services.word_parser import word_parser_service
+
+logger = logging.getLogger(__name__)
 
 
 class AiReviewService:
@@ -33,28 +36,38 @@ class AiReviewService:
                 ],
             )
 
-        try:
-            raw_result = await self.call_chat_completion(prompt, document_text)
-        except Exception as exc:
-            return AiPreReviewResult(
-                passed=False,
-                raw_result={"prompt": prompt, "document_text_preview": document_text[:1000]},
-                issues=[
-                    ReviewIssue(
-                        type="AI_REVIEW_REQUEST_FAILED",
-                        message=f"AI 初审请求失败（{type(exc).__name__}），请转人工审核。",
-                    )
-                ],
-            )
-        return self.parse_ai_result(raw_result)
+        failures = []
+        for model in settings.ai_review_models:
+            try:
+                # Include the response_format compatibility retry in this model's
+                # wall-clock budget, so a stalled upstream cannot block fallback.
+                async with asyncio.timeout(settings.ai_timeout_seconds):
+                    raw_result = await self.call_chat_completion(prompt, document_text, model=model)
+                result = self.parse_ai_result(raw_result)
+                if any(issue.type == "AI_RESPONSE_PARSE_FAILED" for issue in result.issues):
+                    raise ValueError("invalid_review_response")
+            except Exception as exc:
+                # Never log the document, credentials, or upstream response body.
+                category = type(exc).__name__
+                failures.append(category)
+                logger.warning("AI review model failed: model=%s error=%s", model, category)
+                continue
+            logger.info("AI review completed: model=%s fallbacks_used=%s", model, len(failures))
+            # A valid negative review is a business decision, not an outage.
+            return result
+        return AiPreReviewResult(
+            passed=False,
+            issues=[ReviewIssue(type="AI_REVIEW_REQUEST_FAILED",
+                message="主模型及备用模型均未能完成初审，材料将转交人工审核。")],
+        )
 
-    async def call_chat_completion(self, prompt: str, document_text: str) -> dict[str, Any]:
+    async def call_chat_completion(self, prompt: str, document_text: str, *, model: str | None = None) -> dict[str, Any]:
         base_url = settings.ai_api_base_url.rstrip("/")
         if not base_url.endswith("/v1"):
             base_url = f"{base_url}/v1"
         url = f"{base_url}/chat/completions"
         payload: dict[str, Any] = {
-            "model": settings.ai_model,
+            "model": model or settings.ai_model,
             "messages": [
                 {
                     "role": "system",
@@ -74,16 +87,12 @@ class AiReviewService:
         headers = {"Authorization": f"Bearer {settings.ai_api_key}"}
 
         async with httpx.AsyncClient(timeout=settings.ai_timeout_seconds) as client:
-            for attempt in range(3):
+            response = await client.post(url, json=payload, headers=headers)
+            if response.status_code == 400:
+                payload.pop("response_format", None)
                 response = await client.post(url, json=payload, headers=headers)
-                if response.status_code == 400 and "response_format" in payload:
-                    payload.pop("response_format", None)
-                    response = await client.post(url, json=payload, headers=headers)
-                if response.status_code not in {429, 500, 502, 503, 504} or attempt == 2:
-                    response.raise_for_status()
-                    return response.json()
-                await asyncio.sleep(2**attempt)
-        raise RuntimeError("AI request failed without a response")
+            response.raise_for_status()
+            return response.json()
 
     def parse_ai_result(self, raw_result: dict[str, Any]) -> AiPreReviewResult:
         try:

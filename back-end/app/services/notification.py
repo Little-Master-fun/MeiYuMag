@@ -14,7 +14,9 @@ class NotificationService:
         recipients = list(settings.admin_notification_emails)
         result = await db.execute(select(User.email).where(User.role == "admin"))
         recipients.extend(email for email in result.scalars().all() if "@" in email)
-        return self.dedupe_recipients(recipients)
+        secondary_emails = set((await db.execute(select(User.email).where(User.role == "secondary_admin"))).scalars().all())
+        return [email for email in self.dedupe_recipients(recipients)
+                if email not in {item.lower() for item in secondary_emails}]
 
     def dedupe_recipients(self, recipients: list[str]) -> list[str]:
         seen: set[str] = set()

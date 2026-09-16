@@ -59,6 +59,14 @@ async def get_current_admin(
     return current_user
 
 
+async def get_current_secondary_admin(
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> User:
+    if current_user.role != "secondary_admin":
+        raise HTTPException(status_code=403, detail="Secondary administrator required")
+    return current_user
+
+
 async def get_user_by_email(db: AsyncSession, email: str) -> User | None:
     result = await db.execute(select(User).where(User.email == email.lower()))
     return result.scalar_one_or_none()

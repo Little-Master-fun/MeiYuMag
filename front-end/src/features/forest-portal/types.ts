@@ -27,6 +27,7 @@ export interface VenueUsageRangeApi {
 
 export interface PersonalApplicationApi {
   id: number
+  secondary_reviewer_id?: number | null
   organization?: string | null
   borrow_organization?: string | null
   applicant_name?: string | null

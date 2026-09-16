@@ -35,7 +35,13 @@ class Settings(BaseSettings):
     ai_api_base_url: str | None = None
     ai_api_key: str | None = None
     ai_model: str = "Ali-dashscope/MiniMax-M2.5"
+    ai_fallback_models: str = "Ali-dashscope/Qwen3-Max,Ali-dashscope/Kimi-K2.5"
     ai_timeout_seconds: float = 60
+
+    @property
+    def ai_review_models(self) -> list[str]:
+        return list(dict.fromkeys(model.strip() for model in
+            [self.ai_model, *self.ai_fallback_models.split(",")] if model.strip()))
 
     sdu_auth_base_url: str = "https://pass.sdu.edu.cn"
     sdu_service_url: str = "https://service.sdu.edu.cn/tp_up/view?m=up"
