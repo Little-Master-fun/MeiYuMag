@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_admin
 from app.db.session import get_db
 from app.models.application import Application, ApplicationFile
+from app.models.auth_profile import AuthProfile
 from app.models.notification import NotificationLog
 from app.models.user import User
 from app.models.venue import ReservationCalendar
@@ -18,7 +19,7 @@ from app.schemas.application import (
     SupplementRequest,
     SupplementRequestResponse,
 )
-from app.schemas.auth import UserRead, UserUpdateRequest
+from app.schemas.auth import AdminUserRead, UserUpdateRequest
 from app.services.email import email_service
 from app.services.expiration import expiration_service
 from app.services.notification import notification_service
@@ -265,41 +266,51 @@ async def request_supplement(
     )
 
 
-@router.post("/users/{user_id}/allow-application", response_model=UserRead)
+async def admin_user_read(db: AsyncSession, user: User) -> AdminUserRead:
+    name = await db.scalar(select(AuthProfile.name).where(AuthProfile.user_id == user.id))
+    return AdminUserRead.model_validate(user).model_copy(update={"verified_name": name})
+
+
+@router.post("/users/{user_id}/allow-application", response_model=AdminUserRead)
 async def allow_user_application(
     user_id: int,
     current_admin: Annotated[User, Depends(get_current_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> UserRead:
+) -> AdminUserRead:
     user = await db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     user.is_application_allowed = True
     await db.commit()
     await db.refresh(user)
-    return UserRead.model_validate(user)
+    return await admin_user_read(db, user)
 
 
-@router.get("/users", response_model=list[UserRead])
+@router.get("/users", response_model=list[AdminUserRead])
 async def list_users(
     current_admin: Annotated[User, Depends(get_current_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
     role: str | None = None,
-) -> list[UserRead]:
-    query = select(User).order_by(User.created_at.desc())
+) -> list[AdminUserRead]:
+    query = select(User, AuthProfile.name).outerjoin(
+        AuthProfile, AuthProfile.user_id == User.id,
+    ).order_by(User.created_at.desc())
     if role:
         query = query.where(User.role == role)
     result = await db.execute(query)
-    return [UserRead.model_validate(user) for user in result.scalars()]
+    return [
+        AdminUserRead.model_validate(user).model_copy(update={"verified_name": name})
+        for user, name in result.all()
+    ]
 
 
-@router.patch("/users/{user_id}", response_model=UserRead)
+@router.patch("/users/{user_id}", response_model=AdminUserRead)
 async def update_user(
     user_id: int,
     payload: UserUpdateRequest,
     current_admin: Annotated[User, Depends(get_current_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> UserRead:
+) -> AdminUserRead:
     user = await db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
@@ -320,7 +331,7 @@ async def update_user(
         user.is_application_allowed = payload.is_application_allowed
     await db.commit()
     await db.refresh(user)
-    return UserRead.model_validate(user)
+    return await admin_user_read(db, user)
 
 
 @router.post("/maintenance/process-expirations")

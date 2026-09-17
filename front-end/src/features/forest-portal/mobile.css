@@ -141,14 +141,15 @@
   }
   .submission-return-sign {
     top: calc(12px + env(safe-area-inset-top));
-    left: 16px;
-    right: auto;
+    left: auto;
+    right: 14px;
     width: 64px;
     height: 42px;
   }
   .submission-help-tab {
     top: calc(12px + env(safe-area-inset-top));
-    right: 14px;
+    left: 16px;
+    right: auto;
     z-index: 25;
     min-height: 44px;
     padding: 9px 13px;

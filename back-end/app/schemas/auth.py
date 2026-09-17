@@ -52,6 +52,12 @@ class AuthResponse(TokenPair):
     user: UserRead
 
 
+class AdminUserRead(UserRead):
+    """Primary-admin roster only; do not expose identity data in shared user responses."""
+
+    verified_name: str | None = None
+
+
 class UserUpdateRequest(BaseModel):
     role: str | None = Field(default=None, pattern="^(user|admin|secondary_admin)$")
     is_application_allowed: bool | None = None

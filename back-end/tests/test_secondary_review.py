@@ -8,6 +8,7 @@ import test_application_workflow as workflow
 from app.core.config import settings
 from app.models import Application, ApplicationFile, User, ReservationCalendar
 from app.models.notification import NotificationLog
+from app.models.auth_profile import AuthProfile
 from app.services.notification import NotificationService
 
 
@@ -46,6 +47,39 @@ class SecondaryReviewTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.client.patch('/api/v1/admin/users/1', headers=self.headers(uid), json={'role': 'admin'})).status_code, 403)
         self.assertEqual((await self.client.patch('/api/v1/admin/users/2', headers=self.headers(2), json={'role': 'user'})).status_code, 409)
         self.assertEqual((await self.client.get('/api/v1/secondary/applications')).status_code, 403)
+
+    async def test_primary_roster_includes_only_the_verified_profile_name(self):
+        async with self.sessions() as db:
+            db.add(AuthProfile(user_id=1, sduid='test-sdu-1', name='认证测试甲', mobile='13800000000'))
+            await db.commit()
+        response = await self.client.get('/api/v1/admin/users', headers=self.headers(2))
+        self.assertEqual(response.status_code, 200, response.text)
+        users = {user['id']: user for user in response.json()}
+        self.assertEqual(users[1]['verified_name'], '认证测试甲')
+        self.assertIsNone(users[2]['verified_name'])  # Accounts without a profile remain listed.
+        self.assertIsNone(users[3]['verified_name'])
+        for user in users.values():
+            self.assertEqual(set(user), {'id', 'email', 'role', 'department', 'is_sdu_verified', 'is_application_allowed', 'verified_name'})
+        # Editing the role or granting access must not lose the name in the UI.
+        response = await self.client.patch('/api/v1/admin/users/1', headers=self.headers(2), json={'role':'secondary_admin'})
+        self.assertEqual(response.json()['verified_name'], '认证测试甲')
+        response = await self.client.post('/api/v1/admin/users/1/allow-application', headers=self.headers(2))
+        self.assertEqual(response.json()['verified_name'], '认证测试甲')
+        response = await self.client.get('/api/v1/admin/users?role=secondary_admin', headers=self.headers(2))
+        self.assertEqual([(user['id'], user['verified_name']) for user in response.json()], [(1, '认证测试甲')])
+        # Keep this field out of the shared login/profile response schema.
+        response = await self.client.get('/api/v1/auth/me', headers=self.headers(1))
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn('verified_name', response.json())
+
+    async def test_verified_name_admin_endpoints_reject_non_primary_roles(self):
+        await self.appoint()
+        for uid in (1, 3):
+            self.assertEqual((await self.client.get('/api/v1/admin/users', headers=self.headers(uid))).status_code, 403)
+            self.assertEqual((await self.client.post('/api/v1/admin/users/1/allow-application', headers=self.headers(uid))).status_code, 403)
+            self.assertEqual((await self.client.patch('/api/v1/admin/users/1', headers=self.headers(uid), json={'is_application_allowed':True})).status_code, 403)
+        response = await self.client.get('/api/v1/admin/users', headers={'Authorization':'Bearer invalid'})
+        self.assertEqual(response.status_code, 401)
 
     async def test_full_secondary_handoff_and_scoped_downloads(self):
         await self.appoint()

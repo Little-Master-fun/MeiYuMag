@@ -4,25 +4,29 @@ import axios from 'axios'
 import type { User } from '@/stores/auth'
 import { getSubmissionErrorMessage } from '../submission'
 
-const users = ref<User[]>([])
+interface AdminUser extends User {
+  verified_name: string | null
+}
+
+const users = ref<AdminUser[]>([])
 const loading = ref(false), saving = ref(false), error = ref(''), notice = ref('')
 const search = ref(''), roleFilter = ref('')
-const editing = ref<User | null>(null)
+const editing = ref<AdminUser | null>(null)
 const assignmentNote = ref<HTMLElement | null>(null)
 const selectedRole = ref<'user' | 'secondary_admin'>('user')
 const allowed = ref(false)
 const roleNames = { user: '普通用户', secondary_admin: '二级管理员', admin: '一级管理员' }
 const visible = computed(() => users.value.filter(user =>
   (!roleFilter.value || user.role === roleFilter.value) &&
-  `${user.email} ${user.department ?? ''}`.toLowerCase().includes(search.value.trim().toLowerCase()),
+  `${user.verified_name ?? ''} ${user.email} ${user.department ?? ''}`.toLowerCase().includes(search.value.trim().toLowerCase()),
 ))
 async function load() {
   loading.value = true; error.value = ''
-  try { users.value = (await axios.get<User[]>('/api/v1/admin/users')).data }
+  try { users.value = (await axios.get<AdminUser[]>('/api/v1/admin/users')).data }
   catch (e) { error.value = getSubmissionErrorMessage(e) }
   finally { loading.value = false }
 }
-async function edit(user: User) {
+async function edit(user: AdminUser) {
   editing.value = user
   selectedRole.value = user.role === 'secondary_admin' ? 'secondary_admin' : 'user'
   allowed.value = user.is_application_allowed
@@ -35,7 +39,7 @@ async function save() {
   if (!editing.value || saving.value) return
   saving.value = true; error.value = ''
   try {
-    const { data } = await axios.patch<User>(`/api/v1/admin/users/${editing.value.id}`, {
+    const { data } = await axios.patch<AdminUser>(`/api/v1/admin/users/${editing.value.id}`, {
       ...(editing.value.role !== 'admin' ? {role: selectedRole.value} : {}),
       is_application_allowed: allowed.value,
     })
@@ -54,19 +58,19 @@ onMounted(load)
     <p v-if="error" role="alert" class="register-error">{{ error }} <button @click="load" :disabled="loading || saving">重试</button></p>
     <p v-if="notice" role="status">{{ notice }}</p>
     <div class="register-filter">
-      <label>查找用户<input v-model="search" type="search" placeholder="邮箱或所属组织" /></label>
+      <label>查找用户<input v-model="search" type="search" placeholder="认证姓名、邮箱或所属组织" /></label>
       <label>身份<select v-model="roleFilter"><option value="">全部身份</option><option v-for="(label, role) in roleNames" :key="role" :value="role">{{ label }}</option></select></label>
     </div>
     <p v-if="loading">正在翻开名册…</p>
     <p v-else-if="!visible.length">没有符合条件的用户。</p>
     <article v-for="user in visible" :key="user.id" class="user-leaf">
-      <div><strong>{{ user.email }}</strong><small>{{ user.department || '未填写组织' }}</small></div>
+      <div><span class="verified-name">认证姓名：<strong>{{ user.verified_name || '暂无认证姓名' }}</strong></span><span class="user-email">{{ user.email }}</span><small>{{ user.department || '未填写组织' }}</small></div>
       <span class="role-stamp">{{ roleNames[user.role] }}</span>
       <p>{{ user.is_sdu_verified ? '身份已认证' : '未认证' }} · {{ user.is_application_allowed || user.is_sdu_verified ? '可申请' : '未开通申请' }}</p>
       <button :disabled="saving" @click="edit(user)">管理身份与权限 ↗</button>
     </article>
     <section v-if="editing" ref="assignmentNote" class="assignment-note" role="region" aria-label="身份指派" tabindex="-1">
-      <h3>身份指派</h3><p>{{ editing.email }}</p>
+      <h3>身份指派</h3><p>认证姓名：{{ editing.verified_name || '暂无认证姓名' }}<br>{{ editing.email }}</p>
       <fieldset :disabled="saving">
         <label v-if="editing.role !== 'admin'">用户身份<select v-model="selectedRole" aria-label="用户身份"><option value="user">普通用户</option><option value="secondary_admin">二级管理员 · 签章协办</option></select></label>
         <p v-else>一级管理员身份保持不变。</p>
@@ -92,6 +96,8 @@ button:disabled { opacity: .5; cursor: wait; }
 button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid #617658; outline-offset: 3px; }
 .user-leaf { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; padding: 18px 0; border-top: 1px solid #b8a87c66; }
 .user-leaf strong, .assignment-note p { overflow-wrap: anywhere; }
+.verified-name { display: block; color: #58452f; }
+.user-email { display: block; margin-top: 5px; font-size: 14px; overflow-wrap: anywhere; }
 .user-leaf small { display: block; margin-top: 6px; }
 .user-leaf p { margin: 0; font-size: 13px; align-self: center; }
 .role-stamp { color: #5e7359; font-size: 13px; align-self: start; }
