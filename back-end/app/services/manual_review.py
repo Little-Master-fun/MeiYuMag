@@ -18,13 +18,15 @@ async def approve_manual_venue(db: AsyncSession, application: Application, paylo
     if venue is None or not organization or not payload.time_slots:
         raise HTTPException(400, "请根据原件填写场地、借用组织和完整借用时段后通过初审")
     slots = sorted([(local_time(s.start_at), local_time(s.end_at)) for s in payload.time_slots])
+    kind = "yueyuan_third_floor" if "悦园三楼" in venue.name else "meiyu_venue"
     now = datetime.now(BUSINESS_TZ)
     for index, (start, end) in enumerate(slots):
-        if start <= now or end <= start:
-            raise HTTPException(400, "借用时间必须在未来，结束时间须晚于开始时间")
+        if end <= start:
+            raise HTTPException(400, "结束时间须晚于开始时间")
+        if kind == "yueyuan_third_floor" and start <= now:
+            raise HTTPException(400, "悦园借用时间必须在未来")
         if index and start < slots[index-1][1]:
             raise HTTPException(400, "本次申请的时段不能相互重叠")
-    kind = "yueyuan_third_floor" if "悦园三楼" in venue.name else "meiyu_venue"
     if kind == "yueyuan_third_floor":
         days = sorted({start.date() for start, _ in slots})
         if len(days) > 3 or any(b-a == timedelta(days=1) for a,b in zip(days,days[1:])) or any(start.date() != end.date() for start,end in slots):

@@ -212,8 +212,10 @@ async def evaluate_pre_review(
         if slot.start_at.tzinfo is None or slot.end_at.tzinfo is None:
             issues.append(ReviewIssue(type="INVALID_TIME_SLOT", message="借用时间缺少时区，请重新提交"))
             continue
-        if slot.end_at <= slot.start_at or slot.start_at <= datetime.now(timezone.utc):
-            issues.append(ReviewIssue(type="INVALID_TIME_SLOT", message="借用时间必须在未来，且结束晚于开始"))
+        if slot.end_at <= slot.start_at:
+            issues.append(ReviewIssue(type="INVALID_TIME_SLOT", message="结束时间须晚于开始时间"))
+        if application_type != "meiyu_venue" and slot.start_at <= datetime.now(timezone.utc):
+            issues.append(ReviewIssue(type="INVALID_TIME_SLOT", message="借用时间必须在未来"))
         if expected_date and slot.start_at.astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat() != expected_date:
             issues.append(ReviewIssue(type="DATE_MISMATCH", message=f"文件使用日期与所选 {expected_date} 不一致"))
 

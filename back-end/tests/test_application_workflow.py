@@ -93,6 +93,33 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(conflict.json()["passed"])
         self.assertTrue(conflict.json()["conflicts"])
 
+    async def test_ai_meiyu_accepts_past_dates_and_resubmission_but_checks_order_and_conflicts(self):
+        slot = ExtractedTimeSlot(date='2020-01-01', start_time='09:00', end_time='17:00',
+            start_at=datetime(2020, 1, 1, 1, tzinfo=timezone.utc), end_at=datetime(2020, 1, 1, 9, tzinfo=timezone.utc))
+        self.ai.return_value.extracted_time_slots = [slot]
+        response = await self.automatic()
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()['passed'], response.text)
+        conflict = await self.automatic()
+        self.assertFalse(conflict.json()['passed'])
+        self.assertTrue(conflict.json()['conflicts'])
+        aid = conflict.json()['application_id']
+        slot.date = '2020-01-02'
+        slot.start_at = datetime(2020, 1, 2, 1, tzinfo=timezone.utc)
+        slot.end_at = datetime(2020, 1, 2, 9, tzinfo=timezone.utc)
+        retry = await self.client.post(f'/api/v1/applications/{aid}/pre-review', files={'file': ('retry.docx', word_bytes())})
+        self.assertEqual(retry.status_code, 200, retry.text)
+        self.assertTrue(retry.json()['passed'], retry.text)
+        slot.end_at = slot.start_at
+        invalid = await self.automatic()
+        self.assertFalse(invalid.json()['passed'])
+        self.assertTrue(any(i['type'] == 'INVALID_TIME_SLOT' for i in invalid.json()['issues']))
+        slot.end_at = datetime(2020, 1, 2, 9, tzinfo=timezone.utc)
+        self.ai.return_value.venue_name = '悦园三楼'
+        yueyuan = await self.automatic()
+        self.assertFalse(yueyuan.json()['passed'])
+        self.assertTrue(any('未来' in i['message'] for i in yueyuan.json()['issues']))
+
     async def test_auto_yueyuan_keeps_its_signed_material_workflow(self):
         self.ai.return_value.venue_name = "悦园三楼"
         response = await self.automatic()
@@ -150,6 +177,30 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.ai.assert_not_awaited()
         response = await self.client.patch(f'/api/v1/admin/applications/{aid}/status',headers=self.headers(2),json={'status':'submitted'})
         self.assertEqual(response.status_code,200,response.text)
+
+    async def test_manual_meiyu_allows_late_submission_but_checks_times_and_conflicts(self):
+        aid = await self.manual_application()
+        path = f'/api/v1/admin/applications/{aid}/pre-review-decision'
+        slots = [{'start_at': f'2020-01-{day:02d}T09:00:00+08:00',
+                  'end_at': f'2020-01-{day:02d}T17:00:00+08:00'} for day in range(1, 16)]
+        invalid = self.manual_decision(time_slots=[{'start_at': slots[0]['end_at'], 'end_at': slots[0]['start_at']}])
+        self.assertEqual((await self.client.post(path, headers=self.headers(2), json=invalid)).status_code, 400)
+        overlapping = self.manual_decision(time_slots=[slots[0], slots[0]])
+        self.assertEqual((await self.client.post(path, headers=self.headers(2), json=overlapping)).status_code, 400)
+        valid = self.manual_decision(time_slots=slots)
+        response = await self.client.post(path, headers=self.headers(2), json=valid)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['status'], 'pending_signed_files')
+        async with self.sessions() as db:
+            reservations = (await db.execute(select(ReservationCalendar).where(ReservationCalendar.application_id == aid))).scalars().all()
+            self.assertEqual(len(reservations), 15)
+        other = await self.manual_application()
+        response = await self.client.post(f'/api/v1/admin/applications/{other}/pre-review-decision', headers=self.headers(2), json=valid)
+        self.assertEqual(response.status_code, 409, response.text)
+        response = await self.client.post(f'/api/v1/applications/{aid}/signed-files', files={'meiyu_signed_application_form': ('signed.docx', word_bytes())})
+        self.assertEqual(response.status_code, 200, response.text)
+        response = await self.client.patch(f'/api/v1/admin/applications/{aid}/status', headers=self.headers(2), json={'status': 'submitted'})
+        self.assertEqual(response.status_code, 200, response.text)
 
     async def test_manual_review_rechecks_conflicts_and_yueyuan_day_rules(self):
         aid = await self.manual_application()

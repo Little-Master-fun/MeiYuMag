@@ -15,6 +15,7 @@ import {
 import { getSubmissionErrorMessage } from '../submission'
 import { getLocalDateKey, offsetDate } from '../utils'
 import UserManagementPanel from './UserManagementPanel.vue'
+import { dailyTimeSlots, mergeTimeSlots, MAX_MANUAL_TIME_SLOTS } from '../manualTimeSlots'
 
 const props = defineProps<{
   mode: 'personal' | 'admin' | 'secondary' | 'new'
@@ -45,6 +46,28 @@ const kind = ref<'venue' | 'key'>('venue'),
 const date = ref(props.initialDate || getLocalDateKey(offsetDate(new Date(), 1)))
 const manualVenueId = ref(0), manualOrganization = ref(''), manualKeyName = ref('')
 const manualSlots = ref([{ start_at: '', end_at: '' }])
+const batchStartDate = ref(''), batchEndDate = ref(''), batchStartTime = ref(''), batchEndTime = ref('')
+const batchMessage = ref('')
+const canBatchTimeSlots = computed(() => admin.value && selected.value?.status === 'pending_admin_pre_review'
+  && selected.value.application_type !== 'key_borrow'
+  && !!manualVenueId.value
+  && !venues.value.find(v => v.id === manualVenueId.value)?.name.includes('悦园三楼'))
+const batchPreview = computed(() => {
+  try {
+    const slots = dailyTimeSlots(batchStartDate.value, batchEndDate.value, batchStartTime.value, batchEndTime.value)
+    return { slots, message: `共 ${slots.length} 天（含起止日期），每天 ${batchStartTime.value}–${batchEndTime.value}` }
+  } catch (e) {
+    return { slots: [], message: (e as Error).message }
+  }
+})
+function addDailyTimeSlots() {
+  if (!canBatchTimeSlots.value || busy.value) return
+  try {
+    const added = dailyTimeSlots(batchStartDate.value, batchEndDate.value, batchStartTime.value, batchEndTime.value)
+    manualSlots.value = mergeTimeSlots(manualSlots.value, added)
+    batchMessage.value = `已合并到下方列表，共 ${manualSlots.value.length} 个时段；可逐条修改或移除。`
+  } catch (e) { batchMessage.value = (e as Error).message }
+}
 const inputDate = (s: string | null) => s ? new Intl.DateTimeFormat('sv-SE', {
   timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
 }).format(new Date(/Z$|[+-]\d\d:\d\d$/.test(s) ? s : `${s}+08:00`)).replace(' ', 'T') : ''
@@ -119,6 +142,7 @@ async function openApplication(id: number) {
     manualOrganization.value = detail.data.borrow_organization ?? detail.data.organization ?? ''
     manualKeyName.value = detail.data.borrowed_key_name ?? ''
     manualSlots.value = [{ start_at: inputDate(detail.data.start_at), end_at: inputDate(detail.data.end_at) }]
+    batchStartDate.value = ''; batchEndDate.value = ''; batchStartTime.value = ''; batchEndTime.value = ''; batchMessage.value = ''
   } catch (e) {
     if (version === requestVersion) error.value = getSubmissionErrorMessage(e)
   } finally {
@@ -499,12 +523,26 @@ onBeforeUnmount(() => {
               </label>
               <label v-else>钥匙名称<input v-model="manualKeyName" maxlength="255" aria-label="人工审核钥匙名称" /></label>
               <label>借用组织<input v-model="manualOrganization" maxlength="255" aria-label="人工审核借用组织" /></label>
+              <p v-if="canBatchTimeSlots">美育馆支持补录今天或过去的借用时段，请按原件填写实际时间。</p>
+              <div v-if="canBatchTimeSlots" class="batch-time-slots">
+                <h4>连续多天 · 每天固定时段</h4>
+                <div class="manual-slot" @input="batchMessage = ''">
+                  <label>开始日期<input v-model="batchStartDate" type="date" aria-label="批量开始日期" /></label>
+                  <label>结束日期<input v-model="batchEndDate" type="date" :min="batchStartDate || undefined" aria-label="批量结束日期" /></label>
+                  <label>每天开始时间<input v-model="batchStartTime" type="time" aria-label="批量每天开始时间" /></label>
+                  <label>每天结束时间<input v-model="batchEndTime" type="time" aria-label="批量每天结束时间" /></label>
+                </div>
+                <p>{{ batchPreview.message }}</p>
+                <button type="button" :disabled="!batchPreview.slots.length" @click="addDailyTimeSlots">＋ 批量添加到时段列表</button>
+                <p>保留已填时段，自动跳过重复项；最多 {{ MAX_MANUAL_TIME_SLOTS }} 个时段。添加后请核对下方列表，再通过初审。</p>
+                <p v-if="batchMessage" role="status">{{ batchMessage }}</p>
+              </div>
               <div v-for="(slot, index) in manualSlots" :key="index" class="manual-slot">
                 <label>开始时间<input v-model="slot.start_at" type="datetime-local" :aria-label="`借用开始时间 ${index + 1}`" /></label>
                 <label>{{ selected.application_type === 'key_borrow' ? '归还时间' : '结束时间' }}<input v-model="slot.end_at" type="datetime-local" :aria-label="`借用结束时间 ${index + 1}`" /></label>
                 <button v-if="manualSlots.length > 1" type="button" @click="manualSlots.splice(index, 1)">移除此时段</button>
               </div>
-              <button v-if="selected.status === 'pending_admin_pre_review' && manualSlots.length < 20" type="button" @click="manualSlots.push({start_at: '', end_at: ''})">＋ 添加借用时段</button>
+              <button v-if="selected.status === 'pending_admin_pre_review' && manualSlots.length < MAX_MANUAL_TIME_SLOTS" type="button" @click="manualSlots.push({start_at: '', end_at: ''})">＋ 添加借用时段</button>
             </fieldset>
             <textarea
               v-model="reason"
@@ -840,6 +878,8 @@ blockquote small {
 .manual-review-fields label { display: grid; gap: 8px; margin: 12px 0; min-width: 0; }
 .manual-review-fields input, .manual-review-fields select { width: 100%; color: inherit; font: inherit; }
 .manual-slot { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 12px; }
+.batch-time-slots { margin: 16px 0; padding: 14px; border: 1px solid #a7997866; border-radius: 8px; background: #a7997810; }
+.batch-time-slots h4 { margin: 0; }
 .review-letter p {
   font-size: 14px;
 }
