@@ -120,6 +120,32 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(yueyuan.json()['passed'])
         self.assertTrue(any('未来' in i['message'] for i in yueyuan.json()['issues']))
 
+    async def test_room_aliases_resolve_on_submit_retry_and_still_reject_wrong_room(self):
+        async with self.sessions() as db:
+            db.add_all([Venue(id=3, name='大学生研讨室1', venue_type='meiyu'),
+                        Venue(id=4, name='大学生研讨室2', venue_type='meiyu')])
+            await db.commit()
+        for alias, venue_id in [('美育馆研讨室（西）', 3), ('美育馆研讨室(东)', 4)]:
+            self.ai.return_value.venue_name = alias
+            response = await self.automatic()
+            self.assertTrue(response.json()['passed'], response.text)
+            self.assertEqual(response.json()['venue_id'], venue_id)
+        self.ai.return_value.venue_name = '未知场地'
+        queued = await self.automatic()
+        aid = queued.json()['application_id']
+        rejected = await self.client.post(f'/api/v1/admin/applications/{aid}/pre-review-decision',
+            headers=self.headers(2), json={'passed': False, 'reason': '请明确场地'})
+        self.assertEqual(rejected.status_code, 200, rejected.text)
+        self.ai.return_value.venue_name = ' 美育馆研讨室 （ 西 ） '
+        retry = await self.client.post(f'/api/v1/applications/{aid}/pre-review', files={'file': ('retry.docx', word_bytes())})
+        self.assertEqual(retry.status_code, 200, retry.text)
+        self.assertEqual(retry.json()['venue_id'], 3)
+        self.assertTrue(retry.json()['conflicts'])
+        self.ai.return_value.venue_name = '美育馆研讨室（东）'
+        retry = await self.client.post(f'/api/v1/applications/{aid}/pre-review', files={'file': ('retry.docx', word_bytes())})
+        self.assertFalse(retry.json()['passed'])
+        self.assertTrue(any(i['type'] == 'VENUE_MISMATCH' for i in retry.json()['issues']))
+
     async def test_auto_yueyuan_keeps_its_signed_material_workflow(self):
         self.ai.return_value.venue_name = "悦园三楼"
         response = await self.automatic()

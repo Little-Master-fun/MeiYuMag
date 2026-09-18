@@ -1,7 +1,6 @@
 from datetime import datetime, timezone
 from datetime import date as Date
 from zoneinfo import ZoneInfo
-import unicodedata
 from pathlib import Path
 from typing import Annotated
 
@@ -35,6 +34,7 @@ from app.services.ai_review import ai_review_service
 from app.services.file_storage import file_storage_service
 from app.services.notification import notification_service
 from app.services.secondary_review import can_read_assigned, queue_signed_review
+from app.services.venue_names import normalize_venue_name
 
 router = APIRouter(prefix="/applications", tags=["applications"])
 
@@ -186,10 +186,9 @@ async def evaluate_pre_review(
     venue = (await db.execute(select(Venue).where(Venue.id == venue_id).with_for_update())).scalar_one_or_none()
     if venue is None:
         raise HTTPException(400, "所选场地不存在")
-    normalize = lambda value: "".join(unicodedata.normalize("NFKC", value).split())
     if not ai_result.venue_name:
         issues.append(ReviewIssue(type="MISSING_VENUE", message="文件中未识别出场地名称，请写明所申请的场地"))
-    if ai_result.venue_name and normalize(ai_result.venue_name) != normalize(venue.name):
+    if ai_result.venue_name and normalize_venue_name(ai_result.venue_name) != normalize_venue_name(venue.name):
         issues.append(ReviewIssue(type="VENUE_MISMATCH", message=f"文件场地“{ai_result.venue_name}”与所选“{venue.name}”不一致"))
     if not ai_result.extracted_time_slots:
         issues.append(
@@ -629,9 +628,8 @@ async def submit_pre_review(
         return await queue_manual_pre_review(db, current_user, file, venue_id, additional_files=additional_files)
     if venue_id is None:
         # Resolve against real catalog entries; never let AI invent a venue ID.
-        normalize = lambda value: "".join(unicodedata.normalize("NFKC", value or "").split())
         venues = (await db.execute(select(Venue))).scalars().all()
-        matches = [item for item in venues if normalize(item.name) == normalize(ai_result.venue_name)]
+        matches = [item for item in venues if normalize_venue_name(item.name) == normalize_venue_name(ai_result.venue_name)]
         if len(matches) != 1:
             return await queue_manual_pre_review(db, current_user, file, additional_files=additional_files,
                 reason="暂时无法自动确认申请场地，材料已转交人工初审，管理员将核对原文件。")
@@ -787,8 +785,7 @@ async def resubmit_pre_review(
     if needs_manual_review(ai_result):
         return await queue_manual_pre_review(db, current_user, file, application.venue_id, application, additional_files)
     if application.venue_id is None:
-        normalize = lambda value: "".join(unicodedata.normalize("NFKC", value or "").split())
-        matches = [v for v in (await db.execute(select(Venue))).scalars() if normalize(v.name) == normalize(ai_result.venue_name)]
+        matches = [v for v in (await db.execute(select(Venue))).scalars() if normalize_venue_name(v.name) == normalize_venue_name(ai_result.venue_name)]
         if len(matches) != 1:
             return await queue_manual_pre_review(db, current_user, file, application=application, additional_files=additional_files,
                 reason="暂时无法自动确认申请场地，材料已转交人工初审，管理员将核对原文件。")
