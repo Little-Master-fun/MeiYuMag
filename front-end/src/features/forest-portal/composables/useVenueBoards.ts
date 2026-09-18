@@ -32,9 +32,9 @@ export function useVenueBoards({ folderPage, getCanvas }: VenueBoardOptions) {
     if (!canvas) return
     const today = new Date()
     const dateKey = getLocalDateKey(today)
-    const mode = auth.isAdmin ? 'management' : 'user-detail'
-    const rangeStart = getLocalDateKey(mode === 'management' ? today : offsetDate(today, -15))
-    const rangeEnd = getLocalDateKey(mode === 'management' ? today : offsetDate(today, 15))
+    const mode = 'user-detail'
+    const rangeStart = getLocalDateKey(offsetDate(today, -15))
+    const rangeEnd = getLocalDateKey(offsetDate(today, 15))
     venueSelectorReady.value = false
     const loadingBoard: VenueUsageBoard = {
       mode,
@@ -53,10 +53,6 @@ export function useVenueBoards({ folderPage, getCanvas }: VenueBoardOptions) {
         id: venue.id,
         name: venue.name,
         events: events
-          .filter(
-            (event) => mode !== 'management'
-              || getLocalDateKey(new Date(event.start_at)) === dateKey,
-          )
           .sort(
             (first, second) => new Date(first.start_at).getTime()
               - new Date(second.start_at).getTime(),
@@ -83,14 +79,9 @@ export function useVenueBoards({ folderPage, getCanvas }: VenueBoardOptions) {
         venues: usageItems,
       }
       if (folderPage.value === 'calendar') canvas.updateUsageBoard(venueUsageBoard.value)
-      if (mode === 'user-detail') {
-        venueOptions.value = data.venues.map(({ venue }) => venue)
-        selectedVenueId.value = venueOptions.value[0]?.id ?? null
-        venueSelectorReady.value = venueOptions.value.length > 0
-      } else {
-        venueOptions.value = []
-        selectedVenueId.value = null
-      }
+      venueOptions.value = data.venues.map(({ venue }) => venue)
+      selectedVenueId.value = venueOptions.value[0]?.id ?? null
+      venueSelectorReady.value = venueOptions.value.length > 0
     } catch (error) {
       console.error('[场地使用看板] 数据加载失败', error)
       venueUsageBoard.value = {
